@@ -126,6 +126,21 @@ label.lbl:first-child { margin-top: 0; }
            animation: spin .6s linear infinite; vertical-align: middle; margin-right: 4px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ── view tabs ── */
+.view-tab-bar { display: flex; flex-wrap: wrap; gap: 3px;
+                border-bottom: 2px solid #e5e7eb; margin-bottom: 0; }
+.view-tab-btn { padding: 6px 14px; border: 1px solid #e5e7eb; border-bottom: none;
+                border-radius: 6px 6px 0 0; background: #f9fafb; color: #6b7280;
+                cursor: pointer; font-size: 12px; font-weight: 500;
+                display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.view-tab-btn:hover { background: #f3f4f6; color: #374151; }
+.view-tab-btn.active { background: #fff; color: #1a73e8; border-color: #1a73e8;
+                       font-weight: 600; position: relative; bottom: -1px; border-bottom: 2px solid #fff; }
+.view-tab-close { color: #9ca3af; font-size: 14px; line-height: 1;
+                  padding: 0 2px; border-radius: 3px; }
+.view-tab-close:hover { color: #e74c3c; background: #fee2e2; }
+.view-tab-panel { border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 6px 6px; padding: 12px; }
+
 /* ── modal overlay ── */
 .modal-overlay {
   position: fixed; inset: 0; z-index: 9999;
@@ -279,10 +294,14 @@ label.lbl:first-child { margin-top: 0; }
 
   <!-- ── Save JSON ── -->
   <div class="card hidden" id="saveCard">
-    <div class="card-title">Save cam_mapping.json</div>
+    <div class="card-title">Save mapping JSON</div>
     <label class="lbl">rename_files.xlsx path (JSON saves to the same folder)</label>
     <div class="row mt8">
       <input type="text" id="xlsxPath" class="input-full">
+    </div>
+    <label class="lbl">Filename <span style="font-weight:400;color:#9ca3af">(without .json)</span></label>
+    <div class="row mt8">
+      <input type="text" id="saveFilename" value="cam_mapping" style="width:220px">
       <button class="btn-primary" onclick="saveJson()">💾 Save JSON</button>
       <button class="btn-outline" onclick="previewJson()">👁 Preview</button>
     </div>
@@ -344,25 +363,29 @@ label.lbl:first-child { margin-top: 0; }
   <!-- ── View Saved Mapping ── -->
   <div class="card" id="viewCard">
     <div class="section-toggle" onclick="toggleSection('viewBody','viewChevron')">
-      <h3>🗺️ View saved mapping</h3>
+      <h3>🗺️ View saved mappings</h3>
       <span class="chevron" id="viewChevron">▶</span>
     </div>
     <div class="collapse-body" id="viewBody">
       <p style="font-size:12px;color:#6b7280;margin-top:8px">
-        Load a previously saved <code>cam_mapping.json</code> to see its camera assignments on the map.
+        Load one or more saved mapping JSON files. Each opens in its own tab.
       </p>
-      <label class="lbl">cam_mapping.json path</label>
       <div class="row mt8">
         <input type="text" id="viewJsonPath" class="input-full" placeholder="C:\…\cam_mapping.json">
-        <button class="btn-outline" onclick="loadMappingView()">📂 Load</button>
+        <button class="btn-outline" onclick="addViewTab()">📂 Add</button>
       </div>
       <div id="viewMsg" style="margin-top:8px"></div>
-      <div id="viewInfo" class="hidden" style="margin-top:8px;font-size:12px;color:#6b7280"></div>
-      <div id="viewMapWrap" class="hidden" style="margin-top:12px">
-        <div style="margin-bottom:8px">
+
+      <!-- Tab bar + panels (hidden until first load) -->
+      <div id="viewTabsWrap" class="hidden" style="margin-top:14px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <button class="btn-outline btn-sm" id="toggleRedBtn" onclick="toggleViewRed()">Hide unassigned</button>
+          <button class="btn-outline btn-sm" id="viewCaptureBtn" onclick="captureViewMap()">📷 Capture Map</button>
+          <div id="viewTabInfo" style="font-size:11px;color:#9ca3af;margin-left:auto"></div>
         </div>
-        <div id="viewMap" style="height:560px;border-radius:6px;border:1px solid #e5e7eb"></div>
+        <div id="viewCaptureMsg"></div>
+        <div class="view-tab-bar" id="viewTabBar"></div>
+        <div id="viewTabPanels"></div>
       </div>
     </div>
   </div>
@@ -384,95 +407,159 @@ let nonGpsData    = {};    // enumber → full image record (for placement looku
 const thumbCache  = {};    // path → blob URL
 let schoolData    = [];    // [{label, folder, xlsx_path, json_path}]
 let placementMode = null;  // {enumber, file, path} while user picks a spot on the map
-let viewLeafletMap  = null;
-let viewPins        = [];
-let viewRedPins     = [];
-let viewRedVisible  = true;
+let viewTabs      = [];   // { id, label, jsonPath, leafletMap, pins, redPins, redVisible }
+let activeTabId   = null;
 
 // ══════════════════════════════════════════════════════════════════════════════
-// View saved mapping
+// View saved mapping — tab system
 // ══════════════════════════════════════════════════════════════════════════════
-async function loadMappingView() {
+async function addViewTab() {
   const jp = $('viewJsonPath').value.trim();
   setAlert('viewMsg', '');
-  if (!jp) { setAlert('viewMsg', 'Enter a path to cam_mapping.json', 'warn'); return; }
+  if (!jp) { setAlert('viewMsg', 'Enter a path to a mapping JSON file.', 'warn'); return; }
 
   const data = await api('/load_mapping', { json_path: jp });
   if (data.error) { setAlert('viewMsg', data.error, 'red'); return; }
 
   const pts = (data.mapping || []).filter(m => m.lat != null && m.lon != null);
   if (pts.length === 0) {
-    setAlert('viewMsg',
-      'No GPS coordinates found in this file. ' +
-      'Re-save the mapping from the current session to embed coordinates.', 'warn');
+    setAlert('viewMsg', 'No GPS coordinates in this file. Resave from the current session first.', 'warn');
     return;
   }
 
-  // Info bar
-  $('viewInfo').textContent =
-    `Folder: ${data.folder || '—'}   |   Saved: ${data.generated || '—'}   |   ` +
-    `${pts.length} camera(s) with GPS   |   ` +
-    `${(data.mapping || []).filter(m => m.sequenced).length} assigned`;
-  show('viewInfo');
+  const id    = Date.now();
+  const label = jp.replace(/\\/g, '/').split('/').pop().replace(/\.json$/i, '');
 
-  // Init or re-init the view map
-  show('viewMapWrap');
+  // Build map container div
+  const panelDiv = document.createElement('div');
+  panelDiv.id        = `viewPanel-${id}`;
+  panelDiv.className = 'view-tab-panel hidden';
+  const mapDiv = document.createElement('div');
+  mapDiv.id    = `viewMap-${id}`;
+  mapDiv.style.cssText = 'height:560px;border-radius:4px;overflow:hidden';
+  panelDiv.appendChild(mapDiv);
+  $('viewTabPanels').appendChild(panelDiv);
+
+  // Build tab button
+  const btn = document.createElement('button');
+  btn.id        = `viewTabBtn-${id}`;
+  btn.className = 'view-tab-btn';
+  btn.onclick   = () => switchViewTab(id);
+  btn.innerHTML =
+    `<span>${label}</span>` +
+    `<span class="view-tab-close" title="Close" onclick="removeViewTab(${id},event)">×</span>`;
+  $('viewTabBar').appendChild(btn);
+
+  // Init Leaflet
   const avgLat = pts.reduce((s, m) => s + m.lat, 0) / pts.length;
   const avgLon = pts.reduce((s, m) => s + m.lon, 0) / pts.length;
-
-  if (viewLeafletMap) {
-    viewPins.forEach(p => p.remove());
-    viewPins = [];
-    viewRedPins = [];
-    viewRedVisible = true;
-    $('toggleRedBtn').textContent = 'Hide unassigned';
-    viewLeafletMap.setView([avgLat, avgLon], 18);
-  } else {
-    viewLeafletMap = L.map('viewMap').setView([avgLat, avgLon], 18);
-    const sat = L.tileLayer(
-      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-      { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
-    );
-    const osm = L.tileLayer(
-      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
-    );
-    sat.addTo(viewLeafletMap);
-    L.control.layers({ 'Satellite': sat, 'Street Map': osm },
-                     {}, { position: 'topright', collapsed: false }).addTo(viewLeafletMap);
-  }
-  viewLeafletMap.invalidateSize();
+  const lMap   = L.map(`viewMap-${id}`).setView([avgLat, avgLon], 18);
+  const sat = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
+  );
+  const osm = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
+  );
+  sat.addTo(lMap);
+  L.control.layers({ 'Satellite': sat, 'Street Map': osm },
+                   {}, { position: 'topright', collapsed: false }).addTo(lMap);
 
   // Add pins
+  const pins = [], redPins = [];
   pts.forEach(m => {
     const isSeq  = !!m.sequenced;
     const label  = isSeq ? m.proposed : m.enumber;
     const color  = isSeq ? '#16a34a' : '#dc2626';
     const border = isSeq ? '#fbbf24' : 'white';
-    const pin = L.marker([m.lat, m.lon], {
-      icon: pinIcon(label, color, border),
-      title: m.file,
-    });
+    const pin = L.marker([m.lat, m.lon], { icon: pinIcon(label, color, border), title: m.file });
     pin.bindPopup(
-      `<div style="font-size:12px;line-height:1.5">` +
+      `<div style="font-size:12px;line-height:1.6">` +
       `<strong>${m.file}</strong><br>` +
       `Current #: ${m.enumber}<br>` +
       (isSeq ? `Proposed #: <strong>${m.proposed}</strong>` : '<em>Not assigned</em>') +
       `</div>`,
       { maxWidth: 260 }
     );
-    pin.addTo(viewLeafletMap);
-    viewPins.push(pin);
-    if (!isSeq) viewRedPins.push(pin);
+    pin.addTo(lMap);
+    pins.push(pin);
+    if (!isSeq) redPins.push(pin);
   });
 
-  setAlert('viewMsg', `Loaded ${pts.length} camera(s).`, 'green');
+  const tab = { id, label, jsonPath: jp, folder: data.folder || '', leafletMap: lMap,
+                pins, redPins, redVisible: true,
+                info: `Saved: ${data.generated || '—'} | ${pts.length} GPS | ${(data.mapping||[]).filter(m=>m.sequenced).length} assigned` };
+  viewTabs.push(tab);
+
+  show('viewTabsWrap');
+  switchViewTab(id);
+  setAlert('viewMsg', '');
+}
+
+function switchViewTab(id) {
+  viewTabs.forEach(t => {
+    hide(`viewPanel-${t.id}`);
+    $(`viewTabBtn-${t.id}`)?.classList.remove('active');
+  });
+  const tab = viewTabs.find(t => t.id === id);
+  if (!tab) return;
+  show(`viewPanel-${id}`);
+  $(`viewTabBtn-${id}`)?.classList.add('active');
+  activeTabId = id;
+  setTimeout(() => tab.leafletMap.invalidateSize(), 60);
+  $('toggleRedBtn').textContent = tab.redVisible ? 'Hide unassigned' : 'Show unassigned';
+  $('viewTabInfo').textContent  = tab.info;
+}
+
+function removeViewTab(id, event) {
+  event.stopPropagation();
+  const idx = viewTabs.findIndex(t => t.id === id);
+  if (idx === -1) return;
+  const tab = viewTabs[idx];
+  tab.pins.forEach(p => p.remove());
+  tab.leafletMap.remove();
+  $(`viewTabBtn-${id}`).remove();
+  $(`viewPanel-${id}`).remove();
+  viewTabs.splice(idx, 1);
+  if (viewTabs.length === 0) {
+    hide('viewTabsWrap');
+    activeTabId = null;
+    $('viewTabInfo').textContent = '';
+  } else {
+    switchViewTab(viewTabs[Math.min(idx, viewTabs.length - 1)].id);
+  }
 }
 
 function toggleViewRed() {
-  viewRedVisible = !viewRedVisible;
-  viewRedPins.forEach(p => viewRedVisible ? p.addTo(viewLeafletMap) : p.remove());
-  $('toggleRedBtn').textContent = viewRedVisible ? 'Hide unassigned' : 'Show unassigned';
+  const tab = viewTabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  tab.redVisible = !tab.redVisible;
+  tab.redPins.forEach(p => tab.redVisible ? p.addTo(tab.leafletMap) : p.remove());
+  $('toggleRedBtn').textContent = tab.redVisible ? 'Hide unassigned' : 'Show unassigned';
+}
+
+async function captureViewMap() {
+  const tab = viewTabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  const btn = $('viewCaptureBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Capturing…';
+  setAlert('viewCaptureMsg', '');
+  try {
+    const canvas  = await html2canvas(document.getElementById(`viewMap-${tab.id}`), {
+      useCORS: true, allowTaint: false, logging: false,
+    });
+    const base64  = canvas.toDataURL('image/png').split(',')[1];
+    const data    = await api('/save_map_image', { image: base64, folder: tab.folder });
+    if (data.error) setAlert('viewCaptureMsg', `Capture failed: ${data.error}`, 'red');
+    else            setAlert('viewCaptureMsg', `Saved: ${data.path}`, 'green');
+  } catch (err) {
+    setAlert('viewCaptureMsg', `Capture error: ${err.message}`, 'red');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '📷 Capture Map';
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -943,9 +1030,10 @@ function renderSummary() {
 // Save JSON
 // ══════════════════════════════════════════════════════════════════════════════
 async function saveJson() {
-  const xlsx  = $('xlsxPath').value.trim();
-  const start = getStart();
-  const data  = await api('/save_json', { xlsx, start });
+  const xlsx     = $('xlsxPath').value.trim();
+  const start    = getStart();
+  const filename = ($('saveFilename').value.trim() || 'cam_mapping').replace(/\.json$/i, '');
+  const data     = await api('/save_json', { xlsx, start, filename });
   if (data.error) { setAlert('saveResult', data.error, 'red'); return; }
   hide('jsonPreview');
   setAlert('saveResult', `✓ Saved → <code>${data.path}</code>`, 'green');
@@ -954,9 +1042,10 @@ async function saveJson() {
 }
 
 async function previewJson() {
-  const xlsx  = $('xlsxPath').value.trim();
-  const start = getStart();
-  const data  = await api('/save_json', { xlsx, start });
+  const xlsx     = $('xlsxPath').value.trim();
+  const start    = getStart();
+  const filename = ($('saveFilename').value.trim() || 'cam_mapping').replace(/\.json$/i, '');
+  const data     = await api('/save_json', { xlsx, start, filename });
   if (data.error) { setAlert('saveResult', data.error, 'red'); return; }
   setAlert('saveResult', `✓ Saved → <code>${data.path}</code>`, 'green');
   $('ajJson').value = data.path;

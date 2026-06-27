@@ -294,9 +294,10 @@ def thumbnail():
 
 @app.route("/save_json", methods=["POST"])
 def save_json():
-    body  = request.json or {}
-    xlsx  = body.get("xlsx", "").strip()
-    start = max(1, int(body.get("start", 1) or 1))
+    body     = request.json or {}
+    xlsx     = body.get("xlsx", "").strip()
+    start    = max(1, int(body.get("start", 1) or 1))
+    filename = re.sub(r'[^\w\-. ]', '_', body.get("filename", "cam_mapping").strip() or "cam_mapping")
     if not xlsx:
         return jsonify({"error": "xlsx path required"}), 400
 
@@ -320,7 +321,7 @@ def save_json():
             "lon":         r.get("lon"),
         })
 
-    out = str(Path(xlsx).parent / "cam_mapping.json")
+    out = str(Path(xlsx).parent / f"{filename}.json")
     Path(out).write_text(json.dumps({
         "folder":    STATE["folder"],
         "generated": datetime.now().isoformat(timespec="seconds"),
@@ -407,13 +408,14 @@ def write_gps():
 
 @app.route("/save_map_image", methods=["POST"])
 def save_map_image():
-    img_b64 = (request.json or {}).get("image", "")
+    body    = request.json or {}
+    img_b64 = body.get("image", "")
     if not img_b64:
         return jsonify({"error": "No image data"}), 400
 
-    folder = STATE.get("folder", "")
+    folder = body.get("folder", "").strip() or STATE.get("folder", "")
     if not folder:
-        return jsonify({"error": "No project folder scanned yet"}), 400
+        return jsonify({"error": "No project folder available — scan a folder first or load a mapping"}), 400
 
     # …/Camera/Design/Pictures  →  …/Camera/Design/Camera Layout/floor_plans
     floor_plans = Path(folder).parent / "Camera Layout" / "floor_plans"
