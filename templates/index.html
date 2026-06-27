@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Camera Mapper</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -124,6 +125,31 @@ label.lbl:first-child { margin-top: 0; }
            border-top-color: transparent; border-radius: 50%;
            animation: spin .6s linear infinite; vertical-align: middle; margin-right: 4px; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── modal overlay ── */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 9999;
+  background: rgba(0,0,0,.45);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-box {
+  background: #fff; border-radius: 10px; padding: 24px 28px;
+  min-width: 340px; max-width: 460px; width: 90%;
+  box-shadow: 0 12px 40px rgba(0,0,0,.3);
+}
+.modal-title {
+  font-size: 15px; font-weight: 700; color: #1a1a2e; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 8px;
+}
+.modal-body { font-size: 13px; color: #374151; line-height: 1.6; margin-bottom: 20px; }
+.modal-body .modal-field { margin-bottom: 6px; }
+.modal-body .modal-label { font-weight: 600; color: #6b7280; font-size: 11px;
+                           text-transform: uppercase; letter-spacing: .05em; }
+.modal-body .modal-value { font-family: "Consolas","Courier New",monospace;
+                           background: #f3f4f6; padding: 3px 7px; border-radius: 4px;
+                           font-size: 12px; word-break: break-all; display: inline-block;
+                           margin-top: 2px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
 </style>
 </head>
 <body>
@@ -187,7 +213,13 @@ label.lbl:first-child { margin-top: 0; }
       <span style="flex:1">📍 Click the map to place: <strong id="placementLabel"></strong></span>
       <button class="btn-ghost btn-sm" onclick="cancelPlacement()">✕ Cancel</button>
     </div>
-    <div class="card-title" id="mapCardTitle">Step 1 — Click cameras in the desired new order</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div class="card-title" id="mapCardTitle" style="margin-bottom:0">Step 1 — Click cameras in the desired new order</div>
+      <button class="btn-outline btn-sm" id="captureBtn" onclick="captureMap()" title="Save map image to Camera Layout/floor_plans">
+        📷 Capture Map
+      </button>
+    </div>
+    <div id="captureMsg"></div>
 
     <div class="map-layout">
       <div id="map"></div>
@@ -309,6 +341,32 @@ label.lbl:first-child { margin-top: 0; }
     </div>
   </div>
 
+  <!-- ── View Saved Mapping ── -->
+  <div class="card" id="viewCard">
+    <div class="section-toggle" onclick="toggleSection('viewBody','viewChevron')">
+      <h3>🗺️ View saved mapping</h3>
+      <span class="chevron" id="viewChevron">▶</span>
+    </div>
+    <div class="collapse-body" id="viewBody">
+      <p style="font-size:12px;color:#6b7280;margin-top:8px">
+        Load a previously saved <code>cam_mapping.json</code> to see its camera assignments on the map.
+      </p>
+      <label class="lbl">cam_mapping.json path</label>
+      <div class="row mt8">
+        <input type="text" id="viewJsonPath" class="input-full" placeholder="C:\…\cam_mapping.json">
+        <button class="btn-outline" onclick="loadMappingView()">📂 Load</button>
+      </div>
+      <div id="viewMsg" style="margin-top:8px"></div>
+      <div id="viewInfo" class="hidden" style="margin-top:8px;font-size:12px;color:#6b7280"></div>
+      <div id="viewMapWrap" class="hidden" style="margin-top:12px">
+        <div style="margin-bottom:8px">
+          <button class="btn-outline btn-sm" id="toggleRedBtn" onclick="toggleViewRed()">Hide unassigned</button>
+        </div>
+        <div id="viewMap" style="height:560px;border-radius:6px;border:1px solid #e5e7eb"></div>
+      </div>
+    </div>
+  </div>
+
 </div><!-- /container -->
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -326,6 +384,96 @@ let nonGpsData    = {};    // enumber → full image record (for placement looku
 const thumbCache  = {};    // path → blob URL
 let schoolData    = [];    // [{label, folder, xlsx_path, json_path}]
 let placementMode = null;  // {enumber, file, path} while user picks a spot on the map
+let viewLeafletMap  = null;
+let viewPins        = [];
+let viewRedPins     = [];
+let viewRedVisible  = true;
+
+// ══════════════════════════════════════════════════════════════════════════════
+// View saved mapping
+// ══════════════════════════════════════════════════════════════════════════════
+async function loadMappingView() {
+  const jp = $('viewJsonPath').value.trim();
+  setAlert('viewMsg', '');
+  if (!jp) { setAlert('viewMsg', 'Enter a path to cam_mapping.json', 'warn'); return; }
+
+  const data = await api('/load_mapping', { json_path: jp });
+  if (data.error) { setAlert('viewMsg', data.error, 'red'); return; }
+
+  const pts = (data.mapping || []).filter(m => m.lat != null && m.lon != null);
+  if (pts.length === 0) {
+    setAlert('viewMsg',
+      'No GPS coordinates found in this file. ' +
+      'Re-save the mapping from the current session to embed coordinates.', 'warn');
+    return;
+  }
+
+  // Info bar
+  $('viewInfo').textContent =
+    `Folder: ${data.folder || '—'}   |   Saved: ${data.generated || '—'}   |   ` +
+    `${pts.length} camera(s) with GPS   |   ` +
+    `${(data.mapping || []).filter(m => m.sequenced).length} assigned`;
+  show('viewInfo');
+
+  // Init or re-init the view map
+  show('viewMapWrap');
+  const avgLat = pts.reduce((s, m) => s + m.lat, 0) / pts.length;
+  const avgLon = pts.reduce((s, m) => s + m.lon, 0) / pts.length;
+
+  if (viewLeafletMap) {
+    viewPins.forEach(p => p.remove());
+    viewPins = [];
+    viewRedPins = [];
+    viewRedVisible = true;
+    $('toggleRedBtn').textContent = 'Hide unassigned';
+    viewLeafletMap.setView([avgLat, avgLon], 18);
+  } else {
+    viewLeafletMap = L.map('viewMap').setView([avgLat, avgLon], 18);
+    const sat = L.tileLayer(
+      'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+      { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
+    );
+    const osm = L.tileLayer(
+      'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
+    );
+    sat.addTo(viewLeafletMap);
+    L.control.layers({ 'Satellite': sat, 'Street Map': osm },
+                     {}, { position: 'topright', collapsed: false }).addTo(viewLeafletMap);
+  }
+  viewLeafletMap.invalidateSize();
+
+  // Add pins
+  pts.forEach(m => {
+    const isSeq  = !!m.sequenced;
+    const label  = isSeq ? m.proposed : m.enumber;
+    const color  = isSeq ? '#16a34a' : '#dc2626';
+    const border = isSeq ? '#fbbf24' : 'white';
+    const pin = L.marker([m.lat, m.lon], {
+      icon: pinIcon(label, color, border),
+      title: m.file,
+    });
+    pin.bindPopup(
+      `<div style="font-size:12px;line-height:1.5">` +
+      `<strong>${m.file}</strong><br>` +
+      `Current #: ${m.enumber}<br>` +
+      (isSeq ? `Proposed #: <strong>${m.proposed}</strong>` : '<em>Not assigned</em>') +
+      `</div>`,
+      { maxWidth: 260 }
+    );
+    pin.addTo(viewLeafletMap);
+    viewPins.push(pin);
+    if (!isSeq) viewRedPins.push(pin);
+  });
+
+  setAlert('viewMsg', `Loaded ${pts.length} camera(s).`, 'green');
+}
+
+function toggleViewRed() {
+  viewRedVisible = !viewRedVisible;
+  viewRedPins.forEach(p => viewRedVisible ? p.addTo(viewLeafletMap) : p.remove());
+  $('toggleRedBtn').textContent = viewRedVisible ? 'Hide unassigned' : 'Show unassigned';
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // School picker
@@ -365,6 +513,7 @@ function selectSchool() {
   $('xlsxPath').value    = s.xlsx_path;
   $('ajXlsx').value      = s.xlsx_path;
   $('ajJson').value      = s.json_path;
+  $('viewJsonPath').value = s.json_path;
   $('rnXlsx').value      = s.xlsx_path;
 }
 
@@ -382,6 +531,21 @@ function setAlert(id, html, type = 'blue') {
 
 function getStart() {
   return Math.max(1, parseInt($('startNum').value) || 1);
+}
+
+// ── GPS write modal ──────────────────────────────────────────────────────────
+let _gpsModalResolve = null;
+
+function showGpsWriteModal(file, lat, lon) {
+  $('gpsModalFile').textContent   = file;
+  $('gpsModalCoords').textContent = `${lat.toFixed(6)},  ${lon.toFixed(6)}`;
+  show('gpsModal');
+  return new Promise(resolve => { _gpsModalResolve = resolve; });
+}
+
+function resolveGpsModal(ok) {
+  hide('gpsModal');
+  if (_gpsModalResolve) { _gpsModalResolve(ok); _gpsModalResolve = null; }
 }
 
 function toggleSection(bodyId, chevronId) {
@@ -408,11 +572,11 @@ function initLeaflet(lat, lon, zoom = 18) {
 
   const satellite = L.tileLayer(
     'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19 }
+    { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
   );
   const osm = L.tileLayer(
     'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19 }
+    { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19, crossOrigin: 'anonymous' }
   );
   satellite.addTo(leafletMap);
   L.control.layers({ 'Satellite': satellite, 'Street Map': osm },
@@ -450,14 +614,10 @@ function initLeaflet(lat, lon, zoom = 18) {
     afterSeqChange();
 
     // Offer to write GPS coordinates into the actual image file
-    const write = confirm(
-      `Write GPS coordinates to image file?\n\n` +
-      `File: ${file}\n` +
-      `Lat: ${lat.toFixed(6)}  Lon: ${lng.toFixed(6)}`
-    );
+    const write = await showGpsWriteModal(file, lat, lng);
     if (write) {
       const wr = await api('/write_gps', { file, lat, lon: lng });
-      if (wr.error) alert(`GPS write failed:\n${wr.error}`);
+      if (wr.error) setAlert('scanMsg', `GPS write failed: ${wr.error}`, 'red');
     }
   });
 }
@@ -504,6 +664,7 @@ function addMarker(img) {
   const marker = L.marker([lat, lon], {
     icon: pinIcon(enumber, '#dc2626'),
     title: file,
+    draggable: true,
   });
 
   marker.on('mouseover', () => loadPreview(path, file));
@@ -515,6 +676,24 @@ function addMarker(img) {
       removeFromSeq(enumber);
     } else {
       addToSeq(enumber);
+    }
+  });
+
+  marker.on('dragend', async function(e) {
+    const { lat: newLat, lng: newLng } = e.target.getLatLng();
+
+    const result = await api('/place_camera', { file, lat: newLat, lon: newLng });
+    if (result.error) { alert(`Failed to update position:\n${result.error}`); return; }
+
+    // Keep local state in sync
+    markerData[enumber] = { ...markerData[enumber], lat: newLat, lon: newLng };
+    const imgRec = allImages.find(r => r.file === file);
+    if (imgRec) { imgRec.lat = newLat; imgRec.lon = newLng; }
+
+    const write = await showGpsWriteModal(file, newLat, newLng);
+    if (write) {
+      const wr = await api('/write_gps', { file, lat: newLat, lon: newLng });
+      if (wr.error) setAlert('scanMsg', `GPS write failed: ${wr.error}`, 'red');
     }
   });
 
@@ -677,7 +856,8 @@ async function scanFolder() {
   // Pre-fill paths
   $('xlsxPath').value = data.xlsx_path;
   $('ajXlsx').value   = data.xlsx_path;
-  $('ajJson').value   = data.json_path;
+  $('ajJson').value    = data.json_path;
+  $('viewJsonPath').value = data.json_path;
   $('rnXlsx').value   = data.xlsx_path;
 
   // Map — show card BEFORE init so Leaflet measures a real container size
@@ -769,7 +949,8 @@ async function saveJson() {
   if (data.error) { setAlert('saveResult', data.error, 'red'); return; }
   hide('jsonPreview');
   setAlert('saveResult', `✓ Saved → <code>${data.path}</code>`, 'green');
-  $('ajJson').value = data.path;
+  $('ajJson').value       = data.path;
+  $('viewJsonPath').value = data.path;
 }
 
 async function previewJson() {
@@ -806,6 +987,38 @@ async function applyJson() {
   setAlert('ajResult', `✓ Updated ${data.changed} row(s) in 'input' sheet — saved.`, 'green');
   if (data.log && data.log.length) {
     $('ajResult').innerHTML += `<div class="log-box">${data.log.join('\n')}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Capture map image
+// ══════════════════════════════════════════════════════════════════════════════
+async function captureMap() {
+  const btn = $('captureBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Capturing…';
+  setAlert('captureMsg', '');
+
+  try {
+    const canvas = await html2canvas(document.getElementById('map'), {
+      useCORS: true,
+      allowTaint: false,
+      logging: false,
+    });
+    const dataUrl = canvas.toDataURL('image/png');
+    const base64  = dataUrl.split(',')[1];
+
+    const data = await api('/save_map_image', { image: base64 });
+    if (data.error) {
+      setAlert('captureMsg', `Capture failed: ${data.error}`, 'red');
+    } else {
+      setAlert('captureMsg', `Saved: ${data.path}`, 'green');
+    }
+  } catch (err) {
+    setAlert('captureMsg', `Capture error: ${err.message}`, 'red');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = '📷 Capture Map';
   }
 }
 
@@ -848,5 +1061,27 @@ document.querySelectorAll('input[name=rnMode]').forEach(r => {
 // ══════════════════════════════════════════════════════════════════════════════
 loadSchools();
 </script>
+
+<!-- ── GPS Write Modal ── -->
+<div class="modal-overlay hidden" id="gpsModal">
+  <div class="modal-box">
+    <div class="modal-title">📍 Write GPS to File</div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <div class="modal-label">File</div>
+        <div class="modal-value" id="gpsModalFile"></div>
+      </div>
+      <div class="modal-field" style="margin-top:10px">
+        <div class="modal-label">Coordinates</div>
+        <div class="modal-value" id="gpsModalCoords"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="resolveGpsModal(false)">Cancel</button>
+      <button class="btn-success" onclick="resolveGpsModal(true)">Write to File</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>

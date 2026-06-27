@@ -14,7 +14,7 @@ Workflow:
 """
 from __future__ import annotations
 
-import json, os, re, shutil
+import base64, json, os, re, shutil
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -316,6 +316,8 @@ def save_json():
             "enumber_str": r["enumber_str"],
             "proposed":    proposed,
             "sequenced":   r["file"] in seq_files,
+            "lat":         r.get("lat"),
+            "lon":         r.get("lon"),
         })
 
     out = str(Path(xlsx).parent / "cam_mapping.json")
@@ -401,6 +403,73 @@ def write_gps():
         return jsonify({"error": str(e)}), 500
 
     return jsonify({"ok": True})
+
+
+@app.route("/save_map_image", methods=["POST"])
+def save_map_image():
+    img_b64 = (request.json or {}).get("image", "")
+    if not img_b64:
+        return jsonify({"error": "No image data"}), 400
+
+    folder = STATE.get("folder", "")
+    if not folder:
+        return jsonify({"error": "No project folder scanned yet"}), 400
+
+    # …/Camera/Design/Pictures  →  …/Camera/Design/Camera Layout/floor_plans
+    floor_plans = Path(folder).parent / "Camera Layout" / "floor_plans"
+    floor_plans.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path  = floor_plans / f"map_{timestamp}.png"
+
+    try:
+        out_path.write_bytes(base64.b64decode(img_b64))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"path": str(out_path)})
+
+
+@app.route("/load_mapping", methods=["POST"])
+def load_mapping():
+    jp = (request.json or {}).get("json_path", "").strip()
+    if not jp:
+        return jsonify({"error": "json_path required"}), 400
+    if not os.path.isfile(jp):
+        return jsonify({"error": f"File not found: {jp}"}), 404
+    try:
+        data = json.loads(Path(jp).read_text(encoding="utf-8"))
+    except Exception as e:
+        return jsonify({"error": f"Could not parse JSON: {e}"}), 400
+
+    mapping = data.get("mapping", [])
+    folder  = data.get("folder", "")
+
+    # If any entry lacks lat/lon (JSON saved before coordinates were recorded),
+    # fall back to reading GPS directly from the image files in the folder.
+    needs_gps = any(e.get("lat") is None for e in mapping)
+    if needs_gps and folder and os.path.isdir(folder):
+        file_paths = {
+            p.name: str(p)
+            for p in Path(folder).iterdir()
+            if INSTALL_RE.search(p.name) and p.suffix.lower() in IMAGE_EXTS
+        }
+        for entry in mapping:
+            if entry.get("lat") is not None:
+                continue
+            path = file_paths.get(entry.get("file", ""))
+            if not path:
+                continue
+            lat, lon = _get_lat_lon(path)
+            if lat is not None:
+                entry["lat"] = lat
+                entry["lon"] = lon
+
+    return jsonify({
+        "folder":    folder,
+        "generated": data.get("generated", ""),
+        "mapping":   mapping,
+    })
 
 
 @app.route("/apply_json", methods=["POST"])
