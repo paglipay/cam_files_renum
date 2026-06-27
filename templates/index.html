@@ -1,0 +1,852 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Camera Mapper</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+       background: #f0f2f5; color: #333; font-size: 14px; }
+
+/* ── header ── */
+header { background: #1a1a2e; color: #fff; padding: 11px 20px;
+         display: flex; align-items: center; gap: 10px; position: sticky; top: 0; z-index: 1000; }
+header h1 { font-size: 18px; font-weight: 600; }
+
+/* ── layout ── */
+.container { max-width: 1500px; margin: 0 auto; padding: 14px 16px; }
+.card { background: #fff; border-radius: 8px; padding: 16px; margin-bottom: 14px;
+        box-shadow: 0 1px 3px rgba(0,0,0,.1); }
+.card-title { font-size: 14px; font-weight: 600; color: #444; margin-bottom: 12px; }
+
+/* ── form elements ── */
+.row { display: flex; gap: 8px; align-items: center; }
+input[type=text], input[type=number] {
+  padding: 7px 11px; border: 1px solid #d1d5db; border-radius: 6px;
+  font-size: 13px; outline: none; transition: border-color .15s; }
+input[type=text]:focus, input[type=number]:focus { border-color: #1a73e8; }
+.input-full { width: 100%; }
+
+button { padding: 8px 16px; border: none; border-radius: 6px; cursor: pointer;
+         font-size: 13px; font-weight: 500; transition: opacity .15s; white-space: nowrap; }
+button:hover:not(:disabled) { opacity: .85; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.btn-primary  { background: #1a73e8; color: #fff; }
+.btn-success  { background: #27ae60; color: #fff; }
+.btn-outline  { background: #fff; color: #1a73e8; border: 1px solid #1a73e8; }
+.btn-ghost    { background: #fff; color: #555; border: 1px solid #d1d5db; }
+.btn-danger   { background: #e74c3c; color: #fff; }
+.btn-sm       { padding: 4px 10px; font-size: 12px; }
+
+/* ── stats ── */
+.stats { display: flex; gap: 10px; }
+.stat { flex: 1; text-align: center; padding: 12px 8px; background: #f8fafc;
+        border-radius: 6px; border: 1px solid #e5e7eb; }
+.stat-val { font-size: 26px; font-weight: 700; color: #1a73e8; }
+.stat-lbl { font-size: 11px; color: #6b7280; margin-top: 2px; }
+
+/* ── map area ── */
+.map-layout { display: flex; gap: 12px; align-items: flex-start; }
+#map { flex: 1; height: 620px; border-radius: 6px; border: 1px solid #e5e7eb;
+       min-width: 0; }
+.side-panel { width: 270px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
+
+/* ── preview box ── */
+.preview-box { border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;
+               background: #f8fafc; min-height: 140px;
+               display: flex; align-items: center; justify-content: center; }
+.preview-box img { width: 100%; height: auto; display: block; }
+.preview-ph { color: #9ca3af; font-size: 12px; text-align: center; padding: 20px; }
+
+/* ── sequence list ── */
+.seq-scroll { max-height: 320px; overflow-y: auto; }
+.seq-item { display: flex; align-items: center; gap: 7px; padding: 5px 6px;
+            border-radius: 4px; transition: background .1s; }
+.seq-item:hover { background: #f3f4f6; }
+.seq-badge { width: 24px; height: 24px; border-radius: 50%; background: #27ae60;
+             color: #fff; font-weight: 700; font-size: 11px;
+             display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.seq-file { flex: 1; font-size: 11px; color: #374151; word-break: break-all; line-height: 1.3; }
+.seq-empty { color: #9ca3af; font-size: 12px; text-align: center; padding: 20px 10px; }
+
+/* ── alerts ── */
+.alert { padding: 9px 13px; border-radius: 6px; font-size: 13px; margin-top: 8px; line-height: 1.4; }
+.alert-blue  { background: #eff6ff; border-left: 3px solid #3b82f6; color: #1e3a5f; }
+.alert-green { background: #f0fdf4; border-left: 3px solid #22c55e; color: #14532d; }
+.alert-red   { background: #fef2f2; border-left: 3px solid #ef4444; color: #7f1d1d; }
+.alert-warn  { background: #fffbeb; border-left: 3px solid #f59e0b; color: #78350f; }
+
+/* ── tables ── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { padding: 8px 10px; text-align: left; background: #f9fafb;
+     border-bottom: 2px solid #e5e7eb; font-weight: 600; color: #374151; }
+td { padding: 7px 10px; border-bottom: 1px solid #f3f4f6; vertical-align: middle; }
+tr:last-child td { border-bottom: none; }
+tbody tr:hover td { background: #f9fafb; }
+td input[type=number] { width: 80px; }
+
+/* ── collapsible sections ── */
+.section-toggle { display: flex; justify-content: space-between; align-items: center;
+                  cursor: pointer; user-select: none; }
+.section-toggle h3 { font-size: 14px; font-weight: 600; }
+.chevron { color: #9ca3af; font-size: 13px; transition: transform .2s; }
+.chevron.open { transform: rotate(90deg); }
+.collapse-body { display: none; margin-top: 12px; }
+.collapse-body.open { display: block; }
+
+/* ── log output ── */
+.log-box { background: #1e1e1e; color: #d4d4d4; font-family: "Consolas", "Courier New", monospace;
+           font-size: 12px; padding: 10px 12px; border-radius: 4px;
+           max-height: 180px; overflow-y: auto; white-space: pre; margin-top: 8px; }
+
+/* ── utilities ── */
+.hidden { display: none !important; }
+.mt8 { margin-top: 8px; }
+.mt12 { margin-top: 12px; }
+label.lbl { font-size: 12px; font-weight: 500; color: #4b5563; display: block;
+            margin-bottom: 4px; margin-top: 10px; }
+label.lbl:first-child { margin-top: 0; }
+
+/* ── pin icons ── */
+.cam-pin-wrap { background: transparent !important; border: none !important; }
+.cam-pin-inner {
+  width: 30px; height: 30px; border-radius: 50%;
+  color: #fff; font-weight: 700; font-size: 12px;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 6px rgba(0,0,0,.55);
+  cursor: pointer; user-select: none;
+}
+
+/* ── spinner ── */
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff;
+           border-top-color: transparent; border-radius: 50%;
+           animation: spin .6s linear infinite; vertical-align: middle; margin-right: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<header>
+  <span style="font-size:20px">📷</span>
+  <h1>Camera Mapper</h1>
+</header>
+
+<div class="container">
+
+  <!-- ── School Picker (populated on load from /schools) ── -->
+  <div class="card hidden" id="schoolCard">
+    <div class="card-title">Active Project</div>
+    <div class="row">
+      <select id="schoolSelect" style="flex:1;padding:7px 11px;border:1px solid #d1d5db;border-radius:6px;font-size:13px;outline:none;background:#fff"
+              onchange="selectSchool()">
+        <option value="">— select school —</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── Scan ── -->
+  <div class="card">
+    <div class="card-title">Image Folder</div>
+    <div class="row">
+      <input type="text" id="folderInput" class="input-full"
+             placeholder="Paste folder path here…">
+      <button class="btn-primary" id="scanBtn" onclick="scanFolder()">🔍 Scan</button>
+    </div>
+    <div id="scanMsg"></div>
+  </div>
+
+  <!-- ── Stats ── -->
+  <div class="card hidden" id="statsCard">
+    <div class="stats">
+      <div class="stat">
+        <div class="stat-val" id="statTotal">0</div>
+        <div class="stat-lbl">_INSTALL images</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="statGPS" style="color:#27ae60">0</div>
+        <div class="stat-lbl">With GPS (on map)</div>
+      </div>
+      <div class="stat">
+        <div class="stat-val" id="statNoGPS" style="color:#f59e0b">0</div>
+        <div class="stat-lbl">No GPS (table only)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Map + Sequence Panel ── -->
+  <div class="card hidden" id="mapCard">
+    <div class="alert alert-blue" style="margin-bottom:12px">
+      <strong>Click a red pin</strong> to add it to the sequence (1st click = new Cam #1, 2nd = #2 …).
+      <strong>Click a green pin</strong> to remove it. Hover any pin for the photo preview.
+    </div>
+    <!-- Placement mode banner (hidden unless active) -->
+    <div class="alert alert-warn hidden" id="placementBanner"
+         style="margin-bottom:12px;display:flex;align-items:center;gap:10px">
+      <span style="flex:1">📍 Click the map to place: <strong id="placementLabel"></strong></span>
+      <button class="btn-ghost btn-sm" onclick="cancelPlacement()">✕ Cancel</button>
+    </div>
+    <div class="card-title" id="mapCardTitle">Step 1 — Click cameras in the desired new order</div>
+
+    <div class="map-layout">
+      <div id="map"></div>
+
+      <div class="side-panel">
+        <!-- Preview -->
+        <div style="font-size:12px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em">
+          Photo Preview
+        </div>
+        <div class="preview-box" id="previewBox">
+          <div class="preview-ph">Hover over a pin</div>
+        </div>
+
+        <!-- Sequence -->
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:12px;font-weight:600;color:#6b7280;text-transform:uppercase;letter-spacing:.05em">
+            Sequence
+          </span>
+          <span id="seqCount" style="font-size:12px;color:#9ca3af">0 assigned</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+          <label style="font-size:12px;color:#6b7280;white-space:nowrap">Start at #</label>
+          <input type="number" id="startNum" value="1" min="1"
+                 style="width:60px;padding:4px 7px;border:1px solid #d1d5db;border-radius:5px;font-size:13px"
+                 onchange="afterSeqChange()">
+          <span style="font-size:11px;color:#9ca3af">(1st pin gets this number)</span>
+        </div>
+        <div class="seq-scroll" id="seqList">
+          <div class="seq-empty">Click pins on the map</div>
+        </div>
+        <div class="row" style="gap:6px">
+          <button class="btn-ghost btn-sm" style="flex:1" onclick="undoLast()">↩ Undo</button>
+          <button class="btn-ghost btn-sm" style="flex:1;color:#e74c3c;border-color:#e74c3c"
+                  onclick="clearAll()">✕ Clear all</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Non-GPS Table ── -->
+  <div class="card hidden" id="nogpsCard">
+    <div class="card-title">Step 2 — Assign numbers for cameras without GPS</div>
+    <table>
+      <thead><tr><th>File</th><th>Current #</th><th>Proposed #</th><th>Place on map</th></tr></thead>
+      <tbody id="nogpsTbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Mapping Summary ── -->
+  <div class="card hidden" id="summaryCard">
+    <div class="card-title">Mapping Summary</div>
+    <table>
+      <thead><tr><th>File</th><th>Current #</th><th>Proposed #</th><th>GPS</th></tr></thead>
+      <tbody id="summaryTbody"></tbody>
+    </table>
+  </div>
+
+  <!-- ── Save JSON ── -->
+  <div class="card hidden" id="saveCard">
+    <div class="card-title">Save cam_mapping.json</div>
+    <label class="lbl">rename_files.xlsx path (JSON saves to the same folder)</label>
+    <div class="row mt8">
+      <input type="text" id="xlsxPath" class="input-full">
+      <button class="btn-primary" onclick="saveJson()">💾 Save JSON</button>
+      <button class="btn-outline" onclick="previewJson()">👁 Preview</button>
+    </div>
+    <div id="saveResult"></div>
+    <pre id="jsonPreview" class="log-box hidden" style="color:#a8d8a8"></pre>
+  </div>
+
+  <!-- ── Apply JSON → Excel ── -->
+  <div class="card hidden" id="applyCard">
+    <div class="section-toggle" onclick="toggleSection('applyBody','applyChevron')">
+      <h3>📋 Apply JSON → update Excel 'replace' column</h3>
+      <span class="chevron" id="applyChevron">▶</span>
+    </div>
+    <div class="collapse-body" id="applyBody">
+      <p style="font-size:12px;color:#6b7280;margin-top:8px">
+        Reads cam_mapping.json and rewrites the 'replace' column so filenames use the
+        proposed camera number (zero-padding preserved).
+      </p>
+      <label class="lbl">rename_files.xlsx</label>
+      <input type="text" id="ajXlsx" class="input-full">
+      <label class="lbl">cam_mapping.json</label>
+      <input type="text" id="ajJson" class="input-full">
+      <button class="btn-primary mt12" onclick="applyJson()">📝 Apply JSON to Excel</button>
+      <div id="ajResult"></div>
+    </div>
+  </div>
+
+  <!-- ── Run Renames ── -->
+  <div class="card hidden" id="renameCard">
+    <div class="section-toggle" onclick="toggleSection('renameBody','renameChevron')">
+      <h3>🚀 Apply renames (copy / move files)</h3>
+      <span class="chevron" id="renameChevron">▶</span>
+    </div>
+    <div class="collapse-body" id="renameBody">
+      <p style="font-size:12px;color:#6b7280;margin-top:8px">
+        Run this after applying the JSON above. Reads the current 'input' sheet as-is.
+      </p>
+      <label class="lbl">rename_files.xlsx</label>
+      <input type="text" id="rnXlsx" class="input-full">
+      <div class="row mt12" style="gap:16px">
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="rnMode" value="copy" checked> Copy
+        </label>
+        <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px">
+          <input type="radio" name="rnMode" value="move"> Move
+        </label>
+      </div>
+      <div class="alert alert-warn hidden mt8" id="moveWarn">
+        ⚠️ <strong>Move</strong> permanently relocates files. Verify the 'replace' column first.
+        <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;font-size:13px">
+          <input type="checkbox" id="moveConfirm"> I've verified — proceed with move
+        </label>
+      </div>
+      <button class="btn-success mt12" id="runBtn" onclick="runRenames()">▶️ Apply renames</button>
+      <div id="rnResult"></div>
+    </div>
+  </div>
+
+</div><!-- /container -->
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// ══════════════════════════════════════════════════════════════════════════════
+// State
+// ══════════════════════════════════════════════════════════════════════════════
+let leafletMap   = null;
+let markers      = {};     // enumber → Leaflet marker
+let markerData   = {};     // enumber → {file, path, lat, lon}
+let seqState     = [];     // [{file, enumber, proposed}] — GPS cameras
+let allImages     = [];    // full image list (GPS + no-GPS)
+let nonGpsLocal   = {};    // filename → proposed number (client cache)
+let nonGpsData    = {};    // enumber → full image record (for placement lookup)
+const thumbCache  = {};    // path → blob URL
+let schoolData    = [];    // [{label, folder, xlsx_path, json_path}]
+let placementMode = null;  // {enumber, file, path} while user picks a spot on the map
+
+// ══════════════════════════════════════════════════════════════════════════════
+// School picker
+// ══════════════════════════════════════════════════════════════════════════════
+async function loadSchools() {
+  try {
+    const res = await fetch('/schools');
+    const data = await res.json();
+    schoolData = data.schools || [];
+  } catch (e) {
+    schoolData = [];
+  }
+  if (!schoolData.length) return;
+
+  const sel = $('schoolSelect');
+  schoolData.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = s.label;
+    sel.appendChild(opt);
+  });
+
+  // Auto-select if only one active school
+  if (schoolData.length === 1) {
+    sel.value = 0;
+    selectSchool();
+  }
+
+  show('schoolCard');
+}
+
+function selectSchool() {
+  const idx = parseInt($('schoolSelect').value);
+  if (isNaN(idx) || idx < 0 || idx >= schoolData.length) return;
+  const s = schoolData[idx];
+  $('folderInput').value = s.folder;
+  $('xlsxPath').value    = s.xlsx_path;
+  $('ajXlsx').value      = s.xlsx_path;
+  $('ajJson').value      = s.json_path;
+  $('rnXlsx').value      = s.xlsx_path;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Utilities
+// ══════════════════════════════════════════════════════════════════════════════
+const $ = id => document.getElementById(id);
+
+function show(...ids) { ids.forEach(id => $(id).classList.remove('hidden')); }
+function hide(...ids) { ids.forEach(id => $(id).classList.add('hidden')); }
+
+function setAlert(id, html, type = 'blue') {
+  $(id).innerHTML = html ? `<div class="alert alert-${type}">${html}</div>` : '';
+}
+
+function getStart() {
+  return Math.max(1, parseInt($('startNum').value) || 1);
+}
+
+function toggleSection(bodyId, chevronId) {
+  const open = $(bodyId).classList.toggle('open');
+  $(chevronId).classList.toggle('open', open);
+  $(chevronId).textContent = open ? '▼' : '▶';
+}
+
+async function api(url, body) {
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return r.json();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Map
+// ══════════════════════════════════════════════════════════════════════════════
+function initLeaflet(lat, lon, zoom = 18) {
+  if (leafletMap) { leafletMap.remove(); leafletMap = null; }
+  leafletMap = L.map('map').setView([lat, lon], zoom);
+
+  const satellite = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { attribution: 'Esri World Imagery', maxZoom: 21, maxNativeZoom: 19 }
+  );
+  const osm = L.tileLayer(
+    'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { attribution: '© OpenStreetMap', maxZoom: 21, maxNativeZoom: 19 }
+  );
+  satellite.addTo(leafletMap);
+  L.control.layers({ 'Satellite': satellite, 'Street Map': osm },
+                   {}, { position: 'topright', collapsed: false }).addTo(leafletMap);
+
+  // Map click: used for manual GPS placement of non-GPS cameras
+  leafletMap.on('click', async function(e) {
+    if (!placementMode) return;
+    const { lat, lng } = e.latlng;
+    const { enumber, file, path } = placementMode;
+
+    const result = await api('/place_camera', { file, lat, lon: lng });
+    if (result.error) { alert(result.error); return; }
+
+    cancelPlacement();
+
+    // Update allImages in-place so summary/seq state reflect the new GPS
+    const img = allImages.find(r => r.file === file);
+    if (img) { img.lat = lat; img.lon = lng; }
+
+    // Remove from nonGpsData and non-GPS table row
+    delete nonGpsData[enumber];
+    const row = document.getElementById(`nogps-${enumber}`);
+    if (row) row.remove();
+    if (!document.querySelector('#nogpsTbody tr')) hide('nogpsCard');
+
+    // Update stat counters
+    const gpsCount   = allImages.filter(r => r.lat != null).length;
+    const nogpsCount = allImages.filter(r => r.lat == null).length;
+    $('statGPS').textContent   = gpsCount;
+    $('statNoGPS').textContent = nogpsCount;
+
+    // Add pin to map and refresh sequence display
+    addMarker({ lat, lon: lng, enumber, file, path });
+    afterSeqChange();
+
+    // Offer to write GPS coordinates into the actual image file
+    const write = confirm(
+      `Write GPS coordinates to image file?\n\n` +
+      `File: ${file}\n` +
+      `Lat: ${lat.toFixed(6)}  Lon: ${lng.toFixed(6)}`
+    );
+    if (write) {
+      const wr = await api('/write_gps', { file, lat, lon: lng });
+      if (wr.error) alert(`GPS write failed:\n${wr.error}`);
+    }
+  });
+}
+
+function pinIcon(label, color, borderColor = 'white') {
+  return L.divIcon({
+    className: 'cam-pin-wrap',
+    html: `<div class="cam-pin-inner" style="background:${color};border:2.5px solid ${borderColor}">${label}</div>`,
+    iconSize: [30, 30],
+    iconAnchor: [15, 15],
+  });
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Placement mode — let user click map to assign GPS to a non-GPS camera
+// ──────────────────────────────────────────────────────────────────────────────
+function startPlacement(enumber) {
+  const img = nonGpsData[enumber];
+  if (!img) return;
+  placementMode = img;
+
+  // Show / init map if it wasn't already (all-non-GPS case)
+  if (!leafletMap) {
+    show('mapCard');
+    initLeaflet(33.985, -118.310, 12);   // LA default
+    leafletMap.invalidateSize();
+  }
+
+  $('placementLabel').textContent = img.file;
+  show('placementBanner');
+  document.getElementById('mapCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  document.getElementById('map').style.cursor = 'crosshair';
+}
+
+function cancelPlacement() {
+  placementMode = null;
+  hide('placementBanner');
+  if (document.getElementById('map'))
+    document.getElementById('map').style.cursor = '';
+}
+
+function addMarker(img) {
+  const { lat, lon, enumber, file, path } = img;
+  const marker = L.marker([lat, lon], {
+    icon: pinIcon(enumber, '#dc2626'),
+    title: file,
+  });
+
+  marker.on('mouseover', () => loadPreview(path, file));
+
+  marker.on('click', function(e) {
+    L.DomEvent.stopPropagation(e);
+    const entry = seqState.find(s => s.enumber === enumber);
+    if (entry && entry.proposed != null) {
+      removeFromSeq(enumber);
+    } else {
+      addToSeq(enumber);
+    }
+  });
+
+  marker.addTo(leafletMap);
+  markers[enumber]    = marker;
+  markerData[enumber] = { file, path, lat, lon };
+}
+
+function updateMarkers() {
+  const start = getStart();
+  const proposedMap = {};
+  seqState.forEach(s => { if (s.proposed != null) proposedMap[s.enumber] = s.proposed + start - 1; });
+
+  Object.keys(markers).forEach(en => {
+    const enumber = parseInt(en);
+    const el = markers[en].getElement();
+    if (!el) return;
+    const inner = el.querySelector('.cam-pin-inner');
+    if (!inner) return;
+    const p = proposedMap[enumber];
+    if (p != null) {
+      inner.style.background = '#16a34a';
+      inner.style.border = '2.5px solid #fbbf24';
+      inner.textContent = p;
+    } else {
+      inner.style.background = '#dc2626';
+      inner.style.border = '2.5px solid white';
+      inner.textContent = enumber;
+    }
+  });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Image preview
+// ══════════════════════════════════════════════════════════════════════════════
+function loadPreview(path, filename) {
+  const box = $('previewBox');
+  if (thumbCache[path]) {
+    box.innerHTML = `<div>
+      <img src="${thumbCache[path]}" style="width:100%;height:auto;display:block">
+      <div style="font-size:11px;padding:5px 7px;color:#555;word-break:break-all;line-height:1.3">${filename}</div>
+    </div>`;
+    return;
+  }
+  box.innerHTML = '<div class="preview-ph">Loading…</div>';
+  const url = `/thumbnail?path=${encodeURIComponent(path)}`;
+  fetch(url)
+    .then(r => r.blob())
+    .then(blob => {
+      const blobUrl = URL.createObjectURL(blob);
+      thumbCache[path] = blobUrl;
+      box.innerHTML = `<div>
+        <img src="${blobUrl}" style="width:100%;height:auto;display:block">
+        <div style="font-size:11px;padding:5px 7px;color:#555;word-break:break-all;line-height:1.3">${filename}</div>
+      </div>`;
+    })
+    .catch(() => {
+      box.innerHTML = '<div class="preview-ph">Preview unavailable</div>';
+    });
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Sequence actions
+// ══════════════════════════════════════════════════════════════════════════════
+async function addToSeq(enumber) {
+  const data = await api('/sequence/add', { enumber });
+  if (data.error) { alert(data.error); return; }
+  seqState = data.sequence;
+  afterSeqChange();
+}
+
+async function removeFromSeq(enumber) {
+  const data = await api('/sequence/remove', { enumber });
+  if (data.error) { alert(data.error); return; }
+  seqState = data.sequence;
+  afterSeqChange();
+}
+
+async function undoLast() {
+  const data = await api('/sequence/undo', {});
+  seqState = data.sequence;
+  afterSeqChange();
+}
+
+async function clearAll() {
+  if (!confirm('Clear the entire sequence?')) return;
+  const data = await api('/sequence/clear', {});
+  seqState = data.sequence;
+  afterSeqChange();
+}
+
+function afterSeqChange() {
+  updateMarkers();
+  renderSeqPanel();
+  renderSummary();
+}
+
+function renderSeqPanel() {
+  const start = getStart();
+  const assigned = seqState.filter(s => s.proposed != null);
+  $('seqCount').textContent = `${assigned.length} of ${seqState.length} assigned`;
+
+  if (assigned.length === 0) {
+    $('seqList').innerHTML = '<div class="seq-empty">Click pins on the map to build the sequence</div>';
+    return;
+  }
+  $('seqList').innerHTML = assigned.map(s => `
+    <div class="seq-item">
+      <div class="seq-badge">${s.proposed + start - 1}</div>
+      <div class="seq-file">${s.file}</div>
+      <button class="btn-ghost btn-sm"
+              style="color:#dc2626;border-color:#dc2626;padding:2px 6px;font-size:10px"
+              onclick="removeFromSeq(${s.enumber})">✕</button>
+    </div>
+  `).join('');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Scan
+// ══════════════════════════════════════════════════════════════════════════════
+async function scanFolder() {
+  const folder = $('folderInput').value.trim();
+  if (!folder) { alert('Enter a folder path.'); return; }
+
+  const btn = $('scanBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Scanning…';
+  setAlert('scanMsg', '');
+
+  // Reset state
+  if (leafletMap) {
+    Object.values(markers).forEach(m => m.remove());
+  }
+  markers = {}; markerData = {}; seqState = []; allImages = []; nonGpsLocal = {};
+
+  const data = await api('/scan', { folder });
+  btn.disabled = false;
+  btn.innerHTML = '🔍 Scan';
+
+  if (data.error) {
+    setAlert('scanMsg', data.error, 'red');
+    return;
+  }
+
+  allImages = data.images;
+  const gpsImgs   = allImages.filter(r => r.lat !== null && r.lat !== undefined);
+  const nogpsImgs = allImages.filter(r => r.lat === null  || r.lat === undefined);
+
+  // Stats
+  $('statTotal').textContent = allImages.length;
+  $('statGPS').textContent   = gpsImgs.length;
+  $('statNoGPS').textContent = nogpsImgs.length;
+  show('statsCard');
+
+  if (allImages.length === 0) {
+    setAlert('scanMsg', 'No *_INSTALL* images found in that folder.', 'warn');
+    return;
+  }
+
+  // Pre-fill paths
+  $('xlsxPath').value = data.xlsx_path;
+  $('ajXlsx').value   = data.xlsx_path;
+  $('ajJson').value   = data.json_path;
+  $('rnXlsx').value   = data.xlsx_path;
+
+  // Map — show card BEFORE init so Leaflet measures a real container size
+  if (gpsImgs.length > 0) {
+    const avgLat = gpsImgs.reduce((s, r) => s + r.lat, 0) / gpsImgs.length;
+    const avgLon = gpsImgs.reduce((s, r) => s + r.lon, 0) / gpsImgs.length;
+    show('mapCard');
+    initLeaflet(avgLat, avgLon);
+    leafletMap.invalidateSize();
+    gpsImgs.forEach(img => addMarker(img));
+  } else {
+    setAlert('scanMsg', 'No GPS data found in any images — use "📍 Place" buttons in Step 2 to assign locations on the map.', 'warn');
+  }
+
+  // Non-GPS table
+  nonGpsData = {};
+  nogpsImgs.forEach(r => { nonGpsData[r.enumber] = r; });
+
+  if (nogpsImgs.length > 0) {
+    $('nogpsTbody').innerHTML = nogpsImgs.map(r => `
+      <tr id="nogps-${r.enumber}">
+        <td>${r.file}</td>
+        <td>${r.enumber ?? '—'}</td>
+        <td>
+          <input type="number" value="${r.enumber ?? ''}"
+                 style="width:80px"
+                 onchange="updateNonGps(${r.enumber}, this.value)">
+        </td>
+        <td>
+          <button class="btn-outline btn-sm" onclick="startPlacement(${r.enumber})" title="Click map to assign GPS coordinates">
+            📍 Place
+          </button>
+        </td>
+      </tr>
+    `).join('');
+    show('nogpsCard');
+  }
+
+  show('summaryCard', 'saveCard', 'applyCard', 'renameCard');
+  renderSummary();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Non-GPS update
+// ══════════════════════════════════════════════════════════════════════════════
+async function updateNonGps(enumber, value) {
+  const n = parseInt(value);
+  if (isNaN(n)) return;
+  const file = nonGpsData[enumber]?.file;
+  if (!file) return;
+  nonGpsLocal[file] = n;
+  await api('/non_gps', { updates: { [file]: n } });
+  renderSummary();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Summary table
+// ══════════════════════════════════════════════════════════════════════════════
+function renderSummary() {
+  const start = getStart();
+  const seqMap = {};
+  seqState.forEach(s => { if (s.proposed != null) seqMap[s.file] = s.proposed + start - 1; });
+
+  $('summaryTbody').innerHTML = allImages.map(r => {
+    let proposed;
+    if (r.lat !== null && r.lat !== undefined) {
+      proposed = seqMap[r.file] ?? '<span style="color:#9ca3af">— not yet assigned —</span>';
+    } else {
+      proposed = nonGpsLocal[r.file] ?? r.enumber ?? '—';
+    }
+    const gps = (r.lat !== null && r.lat !== undefined)
+      ? '<span style="color:#16a34a">✓</span>' : '—';
+    return `<tr>
+      <td style="font-size:12px">${r.file}</td>
+      <td>${r.enumber ?? '—'}</td>
+      <td>${proposed}</td>
+      <td>${gps}</td>
+    </tr>`;
+  }).join('');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Save JSON
+// ══════════════════════════════════════════════════════════════════════════════
+async function saveJson() {
+  const xlsx  = $('xlsxPath').value.trim();
+  const start = getStart();
+  const data  = await api('/save_json', { xlsx, start });
+  if (data.error) { setAlert('saveResult', data.error, 'red'); return; }
+  hide('jsonPreview');
+  setAlert('saveResult', `✓ Saved → <code>${data.path}</code>`, 'green');
+  $('ajJson').value = data.path;
+}
+
+async function previewJson() {
+  const xlsx  = $('xlsxPath').value.trim();
+  const start = getStart();
+  const data  = await api('/save_json', { xlsx, start });
+  if (data.error) { setAlert('saveResult', data.error, 'red'); return; }
+  setAlert('saveResult', `✓ Saved → <code>${data.path}</code>`, 'green');
+  $('ajJson').value = data.path;
+
+  const seqMap = {};
+  seqState.forEach(s => { if (s.proposed != null) seqMap[s.file] = s.proposed + start - 1; });
+  const preview = allImages
+    .filter(r => r.enumber != null)
+    .map(r => {
+      const proposed = (r.lat != null) ? (seqMap[r.file] ?? r.enumber) : (nonGpsLocal[r.file] ?? r.enumber);
+      const arrow = proposed !== r.enumber ? ' ←' : '';
+      return `  ${String(r.enumber).padStart(3)} → ${String(proposed).padStart(3)}  ${r.file}${arrow}`;
+    }).join('\n');
+  const pre = $('jsonPreview');
+  pre.textContent = preview;
+  pre.classList.remove('hidden');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Apply JSON → Excel
+// ══════════════════════════════════════════════════════════════════════════════
+async function applyJson() {
+  const xlsx      = $('ajXlsx').value.trim();
+  const json_path = $('ajJson').value.trim();
+  setAlert('ajResult', '');
+  const data = await api('/apply_json', { xlsx, json_path });
+  if (data.error) { setAlert('ajResult', data.error, 'red'); return; }
+  setAlert('ajResult', `✓ Updated ${data.changed} row(s) in 'input' sheet — saved.`, 'green');
+  if (data.log && data.log.length) {
+    $('ajResult').innerHTML += `<div class="log-box">${data.log.join('\n')}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Run renames
+// ══════════════════════════════════════════════════════════════════════════════
+async function runRenames() {
+  const xlsx = $('rnXlsx').value.trim();
+  const mode = document.querySelector('input[name=rnMode]:checked').value;
+  if (mode === 'move' && !$('moveConfirm').checked) {
+    alert('Check the confirmation checkbox before moving files.');
+    return;
+  }
+  setAlert('rnResult', '');
+  const btn = $('runBtn');
+  btn.disabled = true;
+  btn.innerHTML = `<span class="spinner"></span>${mode === 'copy' ? 'Copying' : 'Moving'}…`;
+  const data = await api('/run_renames', { xlsx, mode });
+  btn.disabled = false;
+  btn.innerHTML = '▶️ Apply renames';
+  if (data.error) { setAlert('rnResult', data.error, 'red'); return; }
+  setAlert('rnResult', `✓ Done — ${data.count} file(s) ${mode}d.`, 'green');
+  if (data.log && data.log.length) {
+    $('rnResult').innerHTML += `<div class="log-box">${data.log.join('\n')}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Move mode warning
+// ══════════════════════════════════════════════════════════════════════════════
+document.querySelectorAll('input[name=rnMode]').forEach(r => {
+  r.addEventListener('change', function () {
+    if (this.value === 'move') show('moveWarn');
+    else hide('moveWarn');
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Init
+// ══════════════════════════════════════════════════════════════════════════════
+loadSchools();
+</script>
+</body>
+</html>
