@@ -134,16 +134,36 @@ def _active_schools() -> list[dict]:
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-def _get_lat_lon(path: str):
+# Private, non-standard EXIF tag (Exif IFD) used to stash the camera's Visio
+# icon shape type ("default" / "180" / "270" — how many of its 4 lens heads
+# to draw). No standard EXIF field covers this; a private tag number avoids
+# colliding with any real field (e.g. ImageDescription/UserComment) that
+# other tools or the camera itself might legitimately write.
+SHAPE_TYPE_EXIF_TAG = 0xC7A1
+
+# piexif.dump() raises KeyError on any tag id it doesn't already know the
+# type of — register ours (ASCII) so writes to the Exif IFD succeed.
+piexif.TAGS["Exif"][SHAPE_TYPE_EXIF_TAG] = {"name": "ShapeType", "type": piexif.TYPES.Ascii}
+
+def _get_gps_exif(path: str):
     try:
         img = Image.open(path)
         exif_bytes = img.info.get("exif", b"")
         img.close()
         if not exif_bytes:
-            return None, None
-        gps = piexif.load(exif_bytes).get("GPS", {})
+            return None, None, None, None
+        exif_dict = piexif.load(exif_bytes)
+        gps = exif_dict.get("GPS", {})
+        exif_ifd = exif_dict.get("Exif", {})
+        shape_type = None
+        raw_shape_type = exif_ifd.get(SHAPE_TYPE_EXIF_TAG)
+        if raw_shape_type:
+            try:
+                shape_type = raw_shape_type.decode("ascii")
+            except Exception:
+                pass
         if not gps:
-            return None, None
+            return None, None, None, shape_type
         def _deg(v):
             a, b, c = v
             return a[0] / a[1] + b[0] / b[1] / 60 + c[0] / c[1] / 3600
@@ -151,14 +171,23 @@ def _get_lat_lon(path: str):
         lref = gps.get(piexif.GPSIFD.GPSLatitudeRef)
         lon  = gps.get(piexif.GPSIFD.GPSLongitude)
         lnrf = gps.get(piexif.GPSIFD.GPSLongitudeRef)
+        heading = None
+        try:
+            num, den = gps[piexif.GPSIFD.GPSImgDirection]
+            if den:
+                heading = num / den
+        except Exception:
+            pass
         if lat and lref and lon and lnrf:
             return (
                 _deg(lat) * (-1 if lref == b"S" else 1),
                 _deg(lon) * (-1 if lnrf == b"W" else 1),
+                heading,
+                shape_type,
             )
     except Exception:
         pass
-    return None, None
+    return None, None, None, None
 
 
 def _enumber(stem: str):
@@ -234,7 +263,7 @@ def scan():
         if not INSTALL_RE.search(e.stem):
             continue
         enum, estr, esuf = _enumber(e.stem)
-        lat, lon = _get_lat_lon(str(e))
+        lat, lon, heading, shape_type = _get_gps_exif(str(e))
         images.append({
             "path":        str(e),
             "file":        e.name,
@@ -243,6 +272,8 @@ def scan():
             "esuffix":     esuf,
             "lat":         lat,
             "lon":         lon,
+            "heading":     heading,
+            "shape_type":  shape_type,
         })
 
     STATE.update({"images": images, "folder": folder,
@@ -348,6 +379,8 @@ def save_json():
             "sequenced":   r["file"] in seq_files,
             "lat":         r.get("lat"),
             "lon":         r.get("lon"),
+            "heading":     r.get("heading"),
+            "shape_type":  r.get("shape_type"),
         })
 
     out = str(Path(xlsx).parent / f"{filename}.json")
@@ -374,12 +407,42 @@ def _write_gps_exif(path: str, lat: float, lon: float):
     except Exception:
         exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
 
-    exif_dict["GPS"] = {
+    exif_dict.setdefault("GPS", {}).update({
         piexif.GPSIFD.GPSLatitudeRef:  ("N" if lat >= 0 else "S").encode(),
         piexif.GPSIFD.GPSLatitude:     _dms(abs(lat)),
         piexif.GPSIFD.GPSLongitudeRef: ("E" if lon >= 0 else "W").encode(),
         piexif.GPSIFD.GPSLongitude:    _dms(abs(lon)),
-    }
+    })
+    piexif.insert(piexif.dump(exif_dict), path)
+
+
+def _write_heading_exif(path: str, heading: float):
+    if Path(path).suffix.lower() not in {".jpg", ".jpeg"}:
+        raise ValueError(f"GPS EXIF write only supported for JPEG files")
+
+    try:
+        exif_dict = piexif.load(path)
+    except Exception:
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
+
+    heading = heading % 360
+    exif_dict.setdefault("GPS", {}).update({
+        piexif.GPSIFD.GPSImgDirectionRef: b"T",
+        piexif.GPSIFD.GPSImgDirection:    (round(heading * 100), 100),
+    })
+    piexif.insert(piexif.dump(exif_dict), path)
+
+
+def _write_shape_type_exif(path: str, shape_type: str):
+    if Path(path).suffix.lower() not in {".jpg", ".jpeg"}:
+        raise ValueError(f"GPS EXIF write only supported for JPEG files")
+
+    try:
+        exif_dict = piexif.load(path)
+    except Exception:
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}}
+
+    exif_dict.setdefault("Exif", {})[SHAPE_TYPE_EXIF_TAG] = shape_type.encode("ascii")
     piexif.insert(piexif.dump(exif_dict), path)
 
 
@@ -429,6 +492,103 @@ def write_gps():
 
     try:
         _write_gps_exif(path, float(lat), float(lon))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True})
+
+
+@app.route("/set_heading", methods=["POST"])
+def set_heading():
+    body    = request.json or {}
+    file    = body.get("file", "").strip()
+    heading = body.get("heading")
+
+    if not file or heading is None:
+        return jsonify({"error": "file, heading required"}), 400
+
+    img = next((r for r in STATE["images"] if r["file"] == file), None)
+    if not img:
+        return jsonify({"error": f"File not found in scan: {file}"}), 404
+
+    img["heading"] = float(heading) % 360
+
+    return jsonify({
+        "file":    img["file"],
+        "enumber": img["enumber"],
+        "heading": img["heading"],
+    })
+
+
+@app.route("/write_heading", methods=["POST"])
+def write_heading():
+    body    = request.json or {}
+    file    = body.get("file", "").strip()
+    heading = body.get("heading")
+
+    if not file or heading is None:
+        return jsonify({"error": "file, heading required"}), 400
+
+    img = next((r for r in STATE["images"] if r["file"] == file), None)
+    if not img:
+        return jsonify({"error": f"File not in scan: {file}"}), 404
+
+    path = img["path"]
+    if not os.path.isfile(path):
+        return jsonify({"error": f"Image not found on disk: {path}"}), 404
+
+    try:
+        _write_heading_exif(path, float(heading))
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"ok": True})
+
+
+SHAPE_TYPES = {"default", "180", "270"}
+
+
+@app.route("/set_shape_type", methods=["POST"])
+def set_shape_type():
+    body       = request.json or {}
+    file       = body.get("file", "").strip()
+    shape_type = body.get("shape_type")
+
+    if not file or shape_type not in SHAPE_TYPES:
+        return jsonify({"error": f"file required, shape_type must be one of {sorted(SHAPE_TYPES)}"}), 400
+
+    img = next((r for r in STATE["images"] if r["file"] == file), None)
+    if not img:
+        return jsonify({"error": f"File not found in scan: {file}"}), 404
+
+    img["shape_type"] = shape_type
+
+    return jsonify({
+        "file":       img["file"],
+        "enumber":    img["enumber"],
+        "shape_type": img["shape_type"],
+    })
+
+
+@app.route("/write_shape_type", methods=["POST"])
+def write_shape_type():
+    body       = request.json or {}
+    file       = body.get("file", "").strip()
+    shape_type = body.get("shape_type")
+
+    if not file or shape_type not in SHAPE_TYPES:
+        return jsonify({"error": f"file required, shape_type must be one of {sorted(SHAPE_TYPES)}"}), 400
+
+    img = next((r for r in STATE["images"] if r["file"] == file), None)
+    if not img:
+        return jsonify({"error": f"File not in scan: {file}"}), 404
+
+    path = img["path"]
+    if not os.path.isfile(path):
+        return jsonify({"error": f"Image not found on disk: {path}"}), 404
+
+    try:
+        _write_shape_type_exif(path, shape_type)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -491,10 +651,14 @@ def load_mapping():
             path = file_paths.get(entry.get("file", ""))
             if not path:
                 continue
-            lat, lon = _get_lat_lon(path)
+            lat, lon, heading, shape_type = _get_gps_exif(path)
             if lat is not None:
                 entry["lat"] = lat
                 entry["lon"] = lon
+            if entry.get("heading") is None:
+                entry["heading"] = heading
+            if entry.get("shape_type") is None:
+                entry["shape_type"] = shape_type
 
     return jsonify({
         "folder":    folder,

@@ -119,6 +119,16 @@ label.lbl:first-child { margin-top: 0; }
   box-shadow: 0 2px 6px rgba(0,0,0,.55);
   cursor: pointer; user-select: none;
 }
+.cam-pin-heading {
+  position: absolute;
+  top: -12px; left: 10px;
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 10px solid #1a73e8;
+  transform-origin: 5px 27px;
+  pointer-events: none;
+}
 
 /* ── spinner ── */
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #fff;
@@ -381,6 +391,11 @@ label.lbl:first-child { margin-top: 0; }
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
           <button class="btn-outline btn-sm" id="toggleRedBtn" onclick="toggleViewRed()">Hide unassigned</button>
           <button class="btn-outline btn-sm" id="viewCaptureBtn" onclick="captureViewMap()">📷 Capture Map</button>
+          <label style="font-size:12px;color:#6b7280;white-space:nowrap;margin-left:4px">Pin color</label>
+          <input type="color" id="viewPinColor" value="#dc2626"
+                 onchange="applyViewPinColor()"
+                 style="width:34px;height:26px;border:1px solid #d1d5db;border-radius:4px;padding:2px;cursor:pointer"
+                 title="Change pin color">
           <div id="viewTabInfo" style="font-size:11px;color:#9ca3af;margin-left:auto"></div>
         </div>
         <div id="viewCaptureMsg"></div>
@@ -473,7 +488,7 @@ async function addViewTab() {
     const label  = isSeq ? m.proposed : m.enumber;
     const color  = isSeq ? '#16a34a' : '#dc2626';
     const border = isSeq ? '#fbbf24' : 'white';
-    const pin = L.marker([m.lat, m.lon], { icon: pinIcon(label, color, border), title: m.file });
+    const pin = L.marker([m.lat, m.lon], { icon: pinIcon(label, color, border, m.heading), title: m.file });
     pin.bindPopup(
       `<div style="font-size:12px;line-height:1.6">` +
       `<strong>${m.file}</strong><br>` +
@@ -509,6 +524,7 @@ function switchViewTab(id) {
   activeTabId = id;
   setTimeout(() => tab.leafletMap.invalidateSize(), 60);
   $('toggleRedBtn').textContent = tab.redVisible ? 'Hide unassigned' : 'Show unassigned';
+  $('viewPinColor').value       = tab.pinColor || '#dc2626';
   $('viewTabInfo').textContent  = tab.info;
 }
 
@@ -529,6 +545,17 @@ function removeViewTab(id, event) {
   } else {
     switchViewTab(viewTabs[Math.min(idx, viewTabs.length - 1)].id);
   }
+}
+
+function applyViewPinColor() {
+  const color = $('viewPinColor').value;
+  const tab   = viewTabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  tab.pinColor = color;
+  tab.pins.forEach(p => {
+    const inner = p.getElement()?.querySelector('.cam-pin-inner');
+    if (inner) inner.style.background = color;
+  });
 }
 
 function toggleViewRed() {
@@ -635,6 +662,51 @@ function resolveGpsModal(ok) {
   if (_gpsModalResolve) { _gpsModalResolve(ok); _gpsModalResolve = null; }
 }
 
+// ── Set Direction modal ──────────────────────────────────────────────────────
+let _headingModalResolve = null;
+
+function showHeadingModal(file, currentHeading, currentShapeType) {
+  $('headingModalFile').textContent = file;
+  const h = (typeof currentHeading === 'number' && !isNaN(currentHeading))
+    ? Math.round(currentHeading) : 0;
+  $('headingModalSlider').value = h;
+  $('headingModalNumber').value = h;
+  updateHeadingPreview(h);
+  $('headingModalShapeType').value = currentShapeType || 'default';
+  show('headingModal');
+  return new Promise(resolve => { _headingModalResolve = resolve; });
+}
+
+function updateHeadingPreview(h) {
+  $('headingModalArrow').style.transform = `rotate(${h}deg)`;
+}
+
+function onHeadingSliderInput() {
+  const v = $('headingModalSlider').value;
+  $('headingModalNumber').value = v;
+  updateHeadingPreview(v);
+}
+
+function onHeadingNumberInput() {
+  let v = parseInt($('headingModalNumber').value, 10);
+  if (isNaN(v)) return;
+  v = ((v % 360) + 360) % 360;
+  $('headingModalSlider').value = v;
+  updateHeadingPreview(v);
+}
+
+function resolveHeadingModal(action) {
+  hide('headingModal');
+  if (!_headingModalResolve) return;
+  const resolve = _headingModalResolve;
+  _headingModalResolve = null;
+  resolve(action ? {
+    action,
+    heading:    parseInt($('headingModalNumber').value, 10),
+    shapeType:  $('headingModalShapeType').value,
+  } : null);
+}
+
 function toggleSection(bodyId, chevronId) {
   const open = $(bodyId).classList.toggle('open');
   $(chevronId).classList.toggle('open', open);
@@ -709,10 +781,13 @@ function initLeaflet(lat, lon, zoom = 18) {
   });
 }
 
-function pinIcon(label, color, borderColor = 'white') {
+function pinIcon(label, color, borderColor = 'white', heading = null) {
+  const arrow = (typeof heading === 'number' && !isNaN(heading))
+    ? `<div class="cam-pin-heading" style="transform:rotate(${heading}deg)"></div>`
+    : '';
   return L.divIcon({
     className: 'cam-pin-wrap',
-    html: `<div class="cam-pin-inner" style="background:${color};border:2.5px solid ${borderColor}">${label}</div>`,
+    html: `<div class="cam-pin-inner" style="background:${color};border:2.5px solid ${borderColor}">${label}</div>${arrow}`,
     iconSize: [30, 30],
     iconAnchor: [15, 15],
   });
@@ -747,9 +822,9 @@ function cancelPlacement() {
 }
 
 function addMarker(img) {
-  const { lat, lon, enumber, file, path } = img;
+  const { lat, lon, enumber, file, path, heading, shape_type } = img;
   const marker = L.marker([lat, lon], {
-    icon: pinIcon(enumber, '#dc2626'),
+    icon: pinIcon(enumber, '#dc2626', 'white', heading),
     title: file,
     draggable: true,
   });
@@ -784,9 +859,53 @@ function addMarker(img) {
     }
   });
 
+  marker.on('contextmenu', async function(e) {
+    L.DomEvent.stopPropagation(e);
+    if (e.originalEvent) e.originalEvent.preventDefault();
+
+    const current = markerData[enumber]?.heading;
+    const currentShapeType = markerData[enumber]?.shape_type;
+    const result = await showHeadingModal(file, current, currentShapeType);
+    if (!result) return;
+
+    const setRes = await api('/set_heading', { file, heading: result.heading });
+    if (setRes.error) { alert(`Failed to set direction:\n${setRes.error}`); return; }
+
+    const setShapeRes = await api('/set_shape_type', { file, shape_type: result.shapeType });
+    if (setShapeRes.error) { alert(`Failed to set shape type:\n${setShapeRes.error}`); return; }
+
+    markerData[enumber] = { ...markerData[enumber], heading: setRes.heading, shape_type: setShapeRes.shape_type };
+    const imgRec = allImages.find(r => r.file === file);
+    if (imgRec) { imgRec.heading = setRes.heading; imgRec.shape_type = setShapeRes.shape_type; }
+    setMarkerHeadingVisual(marker, setRes.heading);
+
+    if (result.action === 'write') {
+      const wr = await api('/write_heading', { file, heading: setRes.heading });
+      if (wr.error) setAlert('scanMsg', `Direction write failed: ${wr.error}`, 'red');
+      const wrShape = await api('/write_shape_type', { file, shape_type: setShapeRes.shape_type });
+      if (wrShape.error) setAlert('scanMsg', `Shape type write failed: ${wrShape.error}`, 'red');
+    }
+  });
+
   marker.addTo(leafletMap);
   markers[enumber]    = marker;
-  markerData[enumber] = { file, path, lat, lon };
+  markerData[enumber] = { file, path, lat, lon, heading, shape_type: img.shape_type };
+}
+
+function setMarkerHeadingVisual(marker, heading) {
+  const el = marker.getElement();
+  if (!el) return;
+  let arrow = el.querySelector('.cam-pin-heading');
+  if (typeof heading === 'number' && !isNaN(heading)) {
+    if (!arrow) {
+      arrow = document.createElement('div');
+      arrow.className = 'cam-pin-heading';
+      el.appendChild(arrow);
+    }
+    arrow.style.transform = `rotate(${heading}deg)`;
+  } else if (arrow) {
+    arrow.remove();
+  }
 }
 
 function updateMarkers() {
@@ -1168,6 +1287,45 @@ loadSchools();
     <div class="modal-actions">
       <button class="btn-ghost" onclick="resolveGpsModal(false)">Cancel</button>
       <button class="btn-success" onclick="resolveGpsModal(true)">Write to File</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Set Direction Modal ── -->
+<div class="modal-overlay hidden" id="headingModal">
+  <div class="modal-box">
+    <div class="modal-title">🧭 Set Direction</div>
+    <div class="modal-body">
+      <div class="modal-field">
+        <div class="modal-label">File</div>
+        <div class="modal-value" id="headingModalFile"></div>
+      </div>
+      <div class="modal-field" style="margin-top:14px">
+        <div class="modal-label">Heading (° from true north)</div>
+        <div style="display:flex;align-items:center;gap:12px;margin-top:8px">
+          <input type="range" id="headingModalSlider" min="0" max="359" step="1" value="0"
+                 style="flex:1" oninput="onHeadingSliderInput()">
+          <input type="number" id="headingModalNumber" min="0" max="359" step="1" value="0"
+                 style="width:60px" oninput="onHeadingNumberInput()">
+          <div style="position:relative;width:30px;height:30px;flex:none">
+            <div class="cam-pin-inner" style="background:#6b7280;border:2.5px solid white">N</div>
+            <div class="cam-pin-heading" id="headingModalArrow"></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-field" style="margin-top:14px">
+        <div class="modal-label">Camera shape (Visio icon)</div>
+        <select id="headingModalShapeType" style="margin-top:8px;width:100%;padding:4px 6px">
+          <option value="default">Default (all 4 lenses)</option>
+          <option value="270">270° (3 lenses)</option>
+          <option value="180">180° (2 lenses)</option>
+        </select>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-ghost" onclick="resolveHeadingModal(null)">Cancel</button>
+      <button class="btn-outline" onclick="resolveHeadingModal('set')">Set Only</button>
+      <button class="btn-success" onclick="resolveHeadingModal('write')">Set &amp; Write to File</button>
     </div>
   </div>
 </div>
