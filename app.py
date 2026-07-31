@@ -24,6 +24,23 @@ import piexif
 from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
 
+
+def _resolve_share_root() -> Path:
+    """Resolve the LAUSD OneDrive share root dynamically (mirrors the
+    convention in lausd_tools/acro_form_fill_batch.py). Override with
+    LAUSD_SHARE_ROOT if the default candidates don't match."""
+    env_override = os.environ.get("LAUSD_SHARE_ROOT", "").strip()
+    if env_override:
+        return Path(env_override)
+    candidates = [
+        Path.home() / "OneDrive - Los Angeles Unified School District" / "Paul's Share Folder",
+        Path.home() / "OneDrive" / "Paul's Share Folder",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
 # ── app setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = "cam_mapper_local"
@@ -41,13 +58,11 @@ INSTALL_RE = re.compile(r"_INSTALL", re.IGNORECASE)
 ENUMBER_RE = re.compile(r"(\d+)((?:_[A-Za-z]+|[A-Za-z]+)*)$")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
 
-# Paramiko project files (sibling directory)
-_PARAMIKO_DIR     = Path(__file__).parent.parent / "paramiko"
-_SCHOOLS_JSON     = _PARAMIKO_DIR / "temp_r1.json"
-_TEMPLATES_JSON   = _PARAMIKO_DIR / "visio_templates.json"
-_OUTPUT_DIR_FALLBACK = (
-    "C:/Users/Paul/OneDrive - Los Angeles Unified School District/Paul's Share Folder"
-)
+# lausd_tools project files (sibling directory)
+_LAUSD_TOOLS_DIR  = Path(__file__).parent.parent / "lausd_tools"
+_SCHOOLS_JSON     = _LAUSD_TOOLS_DIR / "temp_r1.json"
+_TEMPLATES_JSON   = _LAUSD_TOOLS_DIR / "visio_templates.json"
+_OUTPUT_DIR_FALLBACK = str(_resolve_share_root())
 _CAM_SUBPATH = "Camera/Design/Pictures"
 _XLSX_NAME   = "rename_files.xlsx"
 
@@ -57,12 +72,26 @@ def _sanitize(name: str) -> str:
     return "".join("_" if c in '<>:"/\\|?*' else c for c in name).strip() or "Unknown"
 
 
+def _remap_legacy_user_path(path: str) -> str:
+    """visio_templates.json stores paths under the original author's
+    C:/Users/Paul profile; remap that prefix onto the current user's home."""
+    normalized = path.replace("\\", "/")
+    legacy_prefix = "C:/Users/Paul/"
+    if not normalized.startswith(legacy_prefix):
+        return path
+    share_marker = "OneDrive - Los Angeles Unified School District/Paul's Share Folder"
+    if share_marker in normalized:
+        tail = normalized.split(share_marker, 1)[1].lstrip("/")
+        return str(_resolve_share_root() / Path(tail))
+    return str(Path.home() / Path(normalized[len(legacy_prefix):]))
+
+
 def _output_dir() -> Path:
     if _TEMPLATES_JSON.exists():
         try:
             jobs = json.loads(_TEMPLATES_JSON.read_text(encoding="utf-8"))
             if isinstance(jobs, list) and jobs and "OUTPUT_DIR" in jobs[0]:
-                return Path(jobs[0]["OUTPUT_DIR"])
+                return Path(_remap_legacy_user_path(jobs[0]["OUTPUT_DIR"]))
         except Exception:
             pass
     return Path(_OUTPUT_DIR_FALLBACK)
