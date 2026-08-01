@@ -6,6 +6,7 @@
 <title>Camera Mapper</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+<script src="https://unpkg.com/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -149,7 +150,31 @@ label.lbl:first-child { margin-top: 0; }
 .view-tab-close { color: #9ca3af; font-size: 14px; line-height: 1;
                   padding: 0 2px; border-radius: 3px; }
 .view-tab-close:hover { color: #e74c3c; background: #fee2e2; }
-.view-tab-panel { border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 6px 6px; padding: 12px; }
+.view-tab-panel { border: 1px solid #e5e7eb; border-top: none; border-radius: 0 0 6px 6px; padding: 12px;
+                  position: relative; }
+
+/* ── titleblock export panel ── */
+.tb-panel { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: flex-end;
+            padding: 10px 12px; background: #f8fafc; border: 1px solid #e5e7eb;
+            border-radius: 6px; margin-top: 8px; }
+.tb-field { display: flex; flex-direction: column; gap: 3px; }
+.tb-field label { font-size: 11px; color: #6b7280; font-weight: 500; }
+.tb-field input[type=text] { padding: 6px 9px; font-size: 12px; }
+.tb-corner { width: 220px; }
+.tb-checkline { display: flex; align-items: center; gap: 6px; font-size: 12px;
+                color: #374151; cursor: pointer; white-space: nowrap; }
+select.tb-select { padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 6px;
+                    font-size: 12px; outline: none; }
+
+/* ── titleblock live map overlay (preview, mirrors the exported overlay) ── */
+.tb-overlay { position: absolute; z-index: 1000; background: rgba(255,255,255,.92);
+              border: 1.5px solid #1a1a2e; border-radius: 6px; padding: 10px 14px;
+              text-align: center; pointer-events: none; max-width: 60%; }
+.tb-overlay.hidden { display: none; }
+.tb-overlay .tb-line-title    { font-weight: 700; font-size: 16px; color: #111; line-height: 1.25; }
+.tb-overlay .tb-line-address  { font-family: Georgia, serif; font-size: 11px; color: #222; margin-top: 2px; }
+.tb-overlay .tb-line-subtitle { font-weight: 700; font-size: 14px; color: #111; margin-top: 4px; }
+.tb-overlay .tb-line-camrange { font-weight: 700; font-size: 12px; color: #111; margin-top: 2px; }
 
 /* ── modal overlay ── */
 .modal-overlay {
@@ -161,7 +186,20 @@ label.lbl:first-child { margin-top: 0; }
   background: #fff; border-radius: 10px; padding: 24px 28px;
   min-width: 340px; max-width: 460px; width: 90%;
   box-shadow: 0 12px 40px rgba(0,0,0,.3);
+  position: relative;
 }
+.modal-box-max { max-width: 1400px; width: 92vw; height: 88vh;
+                  display: flex; flex-direction: column; }
+.modal-close-x { position: absolute; top: 14px; right: 14px; width: 32px; height: 32px;
+                  border-radius: 50%; background: #f3f4f6; border: none; font-size: 16px;
+                  line-height: 1; cursor: pointer; color: #555; }
+.modal-close-x:hover { background: #e5e7eb; color: #111; }
+.image-group-grid { flex: 1; overflow-y: auto; display: grid;
+                     grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+                     gap: 14px; margin-top: 14px; padding-right: 4px; }
+.image-group-item { border: 2px solid #e5e7eb; border-radius: 8px; overflow: hidden; background: #f8fafc; }
+.image-group-item img { width: 100%; height: 200px; object-fit: contain; background: #111; display: block; }
+.image-group-item .cap { font-size: 12px; padding: 6px 8px; color: #374151; word-break: break-all; }
 .modal-title {
   font-size: 15px; font-weight: 700; color: #1a1a2e; margin-bottom: 14px;
   display: flex; align-items: center; gap: 8px;
@@ -359,6 +397,10 @@ label.lbl:first-child { margin-top: 0; }
           <input type="radio" name="rnMode" value="move"> Move
         </label>
       </div>
+      <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:13px;margin-top:10px">
+        <input type="checkbox" id="rnOnlySelected">
+        Only process rows marked <code>selected</code> (skip cameras not assigned in a saved mapping)
+      </label>
       <div class="alert alert-warn hidden mt8" id="moveWarn">
         ⚠️ <strong>Move</strong> permanently relocates files. Verify the 'replace' column first.
         <label style="display:flex;align-items:center;gap:6px;margin-top:8px;cursor:pointer;font-size:13px">
@@ -384,13 +426,27 @@ label.lbl:first-child { margin-top: 0; }
         <input type="text" id="viewJsonPath" class="input-full" placeholder="C:\…\cam_mapping.json">
         <button class="btn-outline" onclick="addViewTab()">📂 Add</button>
       </div>
+      <p style="font-size:12px;color:#6b7280;margin-top:10px">
+        Or point at a folder to pick from every saved mapping JSON in it:
+      </p>
+      <div class="row mt8">
+        <input type="text" id="viewFolder" class="input-full" placeholder="C:\…\Pictures">
+        <button class="btn-outline" onclick="listViewJsonFiles()">🔍 Find JSON files</button>
+      </div>
+      <div id="viewJsonList" class="hidden" style="margin-top:8px">
+        <div id="viewJsonCheckboxes" style="display:flex;flex-direction:column;gap:4px;max-height:180px;
+             overflow-y:auto;border:1px solid #e5e7eb;border-radius:6px;padding:8px;background:#f8fafc"></div>
+        <button class="btn-outline btn-sm mt8" onclick="addSelectedViewTabs()">➕ Add selected</button>
+      </div>
       <div id="viewMsg" style="margin-top:8px"></div>
 
       <!-- Tab bar + panels (hidden until first load) -->
       <div id="viewTabsWrap" class="hidden" style="margin-top:14px">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap">
           <button class="btn-outline btn-sm" id="toggleRedBtn" onclick="toggleViewRed()">Hide unassigned</button>
           <button class="btn-outline btn-sm" id="viewCaptureBtn" onclick="captureViewMap()">📷 Capture Map</button>
+          <button class="btn-outline btn-sm" id="viewDownloadImgBtn" onclick="downloadViewMap('image')">⬇️ Download Image</button>
+          <button class="btn-outline btn-sm" id="viewDownloadPdfBtn" onclick="downloadViewMap('pdf')">⬇️ Download PDF</button>
           <label style="font-size:12px;color:#6b7280;white-space:nowrap;margin-left:4px">Pin color</label>
           <input type="color" id="viewPinColor" value="#dc2626"
                  onchange="applyViewPinColor()"
@@ -399,6 +455,39 @@ label.lbl:first-child { margin-top: 0; }
           <div id="viewTabInfo" style="font-size:11px;color:#9ca3af;margin-left:auto"></div>
         </div>
         <div id="viewCaptureMsg"></div>
+
+        <div class="tb-panel">
+          <label class="tb-checkline">
+            <input type="checkbox" id="tbEnabled" checked onchange="applyViewTitleblock()">
+            Include titleblock
+          </label>
+          <div class="tb-field tb-corner">
+            <label for="tbCorner">Placement</label>
+            <select class="tb-select" id="tbCorner" onchange="applyViewTitleblock()">
+              <option value="upper-right">Upper right</option>
+              <option value="upper-left">Upper left</option>
+              <option value="lower-right">Lower right</option>
+              <option value="lower-left" selected>Lower left</option>
+            </select>
+          </div>
+          <div class="tb-field" style="width:260px">
+            <label for="tbTitle">Site name</label>
+            <input type="text" id="tbTitle" class="input-full" oninput="applyViewTitleblock()">
+          </div>
+          <div class="tb-field" style="width:300px">
+            <label for="tbAddress">Address</label>
+            <input type="text" id="tbAddress" class="input-full" oninput="applyViewTitleblock()">
+          </div>
+          <div class="tb-field" style="width:160px">
+            <label for="tbSubtitle">Subtitle</label>
+            <input type="text" id="tbSubtitle" class="input-full" oninput="applyViewTitleblock()">
+          </div>
+          <div class="tb-field" style="width:180px">
+            <label for="tbCamRange">Camera range</label>
+            <input type="text" id="tbCamRange" class="input-full" oninput="applyViewTitleblock()">
+          </div>
+        </div>
+
         <div class="view-tab-bar" id="viewTabBar"></div>
         <div id="viewTabPanels"></div>
       </div>
@@ -428,10 +517,20 @@ let activeTabId   = null;
 // ══════════════════════════════════════════════════════════════════════════════
 // View saved mapping — tab system
 // ══════════════════════════════════════════════════════════════════════════════
+let viewTabIdSeq = 0;   // Date.now() alone can collide when bulk-adding tabs in a tight loop
+
 async function addViewTab() {
   const jp = $('viewJsonPath').value.trim();
-  setAlert('viewMsg', '');
   if (!jp) { setAlert('viewMsg', 'Enter a path to a mapping JSON file.', 'warn'); return; }
+  await addViewTabFromPath(jp);
+}
+
+async function addViewTabFromPath(jp) {
+  setAlert('viewMsg', '');
+  if (viewTabs.some(t => t.jsonPath === jp)) {
+    setAlert('viewMsg', `Already open: ${jp.replace(/\\/g,'/').split('/').pop()}`, 'warn');
+    return;
+  }
 
   const data = await api('/load_mapping', { json_path: jp });
   if (data.error) { setAlert('viewMsg', data.error, 'red'); return; }
@@ -442,7 +541,7 @@ async function addViewTab() {
     return;
   }
 
-  const id    = Date.now();
+  const id    = `${Date.now()}-${viewTabIdSeq++}`;
   const label = jp.replace(/\\/g, '/').split('/').pop().replace(/\.json$/i, '');
 
   // Build map container div
@@ -453,6 +552,13 @@ async function addViewTab() {
   mapDiv.id    = `viewMap-${id}`;
   mapDiv.style.cssText = 'height:560px;border-radius:4px;overflow:hidden';
   panelDiv.appendChild(mapDiv);
+  // Live on-page preview of the titleblock. Sits outside viewMap-${id} (the
+  // html2canvas capture target) so it never gets double-baked into exports —
+  // exports get their own copy drawn onto the captured canvas.
+  const tbOverlay = document.createElement('div');
+  tbOverlay.id        = `tbOverlay-${id}`;
+  tbOverlay.className = 'tb-overlay hidden';
+  panelDiv.appendChild(tbOverlay);
   $('viewTabPanels').appendChild(panelDiv);
 
   // Build tab button
@@ -460,9 +566,15 @@ async function addViewTab() {
   btn.id        = `viewTabBtn-${id}`;
   btn.className = 'view-tab-btn';
   btn.onclick   = () => switchViewTab(id);
-  btn.innerHTML =
-    `<span>${label}</span>` +
-    `<span class="view-tab-close" title="Close" onclick="removeViewTab(${id},event)">×</span>`;
+  const labelSpan = document.createElement('span');
+  labelSpan.textContent = label;
+  const closeSpan = document.createElement('span');
+  closeSpan.className = 'view-tab-close';
+  closeSpan.title     = 'Close';
+  closeSpan.textContent = '×';
+  closeSpan.onclick = (event) => removeViewTab(id, event);
+  btn.appendChild(labelSpan);
+  btn.appendChild(closeSpan);
   $('viewTabBar').appendChild(btn);
 
   // Init Leaflet
@@ -483,20 +595,39 @@ async function addViewTab() {
 
   // Add pins
   const pins = [], redPins = [];
+  const folder = data.folder || '';
   pts.forEach(m => {
     const isSeq  = !!m.sequenced;
     const label  = isSeq ? m.proposed : m.enumber;
     const color  = isSeq ? '#16a34a' : '#dc2626';
     const border = isSeq ? '#fbbf24' : 'white';
     const pin = L.marker([m.lat, m.lon], { icon: pinIcon(label, color, border, m.heading), title: m.file });
-    pin.bindPopup(
-      `<div style="font-size:12px;line-height:1.6">` +
-      `<strong>${m.file}</strong><br>` +
+
+    // Built as real DOM nodes (not an HTML string) so folder/file values —
+    // which can contain characters like an apostrophe (e.g. "Paul's Share
+    // Folder") — never have to be escaped into a JS-in-HTML-attribute string.
+    const content = document.createElement('div');
+    content.style.cssText = 'font-size:12px;line-height:1.6;width:200px';
+    if (folder) {
+      const img = document.createElement('img');
+      img.src     = `/thumbnail?path=${encodeURIComponent(joinPath(folder, m.file))}`;
+      img.alt     = '';
+      img.loading = 'lazy';
+      img.title   = 'Click to view all images for this camera number';
+      img.style.cssText = 'width:100%;height:auto;border-radius:4px;margin-bottom:6px;' +
+                           'display:block;background:#f1f5f9;cursor:pointer';
+      img.onerror = () => { img.style.display = 'none'; };
+      img.onclick = () => openImageGroupModal(folder, m.enumber, m.file);
+      content.appendChild(img);
+    }
+    const info = document.createElement('div');
+    info.innerHTML =
+      `<strong>${escapeHtml(m.file)}</strong><br>` +
       `Current #: ${m.enumber}<br>` +
-      (isSeq ? `Proposed #: <strong>${m.proposed}</strong>` : '<em>Not assigned</em>') +
-      `</div>`,
-      { maxWidth: 260 }
-    );
+      (isSeq ? `Proposed #: <strong>${m.proposed}</strong>` : '<em>Not assigned</em>');
+    content.appendChild(info);
+
+    pin.bindPopup(content, { maxWidth: 260 });
     pin.addTo(lMap);
     pins.push(pin);
     if (!isSeq) redPins.push(pin);
@@ -505,11 +636,47 @@ async function addViewTab() {
   const tab = { id, label, jsonPath: jp, folder: data.folder || '', leafletMap: lMap,
                 pins, redPins, redVisible: true,
                 info: `Saved: ${data.generated || '—'} | ${pts.length} GPS | ${(data.mapping||[]).filter(m=>m.sequenced).length} assigned` };
+  tab.titleblock = defaultTitleblock(tab, pts, data);
   viewTabs.push(tab);
+  renderTitleblockOverlay(tab);
 
   show('viewTabsWrap');
   switchViewTab(id);
   setAlert('viewMsg', '');
+}
+
+async function listViewJsonFiles() {
+  const folder = $('viewFolder').value.trim();
+  setAlert('viewMsg', '');
+  if (!folder) { setAlert('viewMsg', 'Enter a folder path.', 'warn'); return; }
+
+  const data = await api('/list_json', { folder });
+  if (data.error) { setAlert('viewMsg', data.error, 'red'); return; }
+
+  const files = data.files || [];
+  const box = $('viewJsonCheckboxes');
+  if (!files.length) {
+    box.innerHTML = '<div style="font-size:12px;color:#9ca3af">No .json files found in this folder.</div>';
+  } else {
+    box.innerHTML = files.map((f, i) => `
+      <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer">
+        <input type="checkbox" class="view-json-cb" data-idx="${i}" checked>
+        ${escapeHtml(f.name)}
+      </label>
+    `).join('');
+    box._files = files;   // keep full paths off the DOM (avoids HTML-attribute escaping of Windows paths)
+  }
+  show('viewJsonList');
+}
+
+async function addSelectedViewTabs() {
+  const box   = $('viewJsonCheckboxes');
+  const files = box._files || [];
+  const idxs  = Array.from(document.querySelectorAll('.view-json-cb:checked')).map(cb => parseInt(cb.dataset.idx, 10));
+  if (!idxs.length) { setAlert('viewMsg', 'Select at least one JSON file.', 'warn'); return; }
+  for (const i of idxs) {
+    await addViewTabFromPath(files[i].path);
+  }
 }
 
 function switchViewTab(id) {
@@ -526,6 +693,14 @@ function switchViewTab(id) {
   $('toggleRedBtn').textContent = tab.redVisible ? 'Hide unassigned' : 'Show unassigned';
   $('viewPinColor').value       = tab.pinColor || '#dc2626';
   $('viewTabInfo').textContent  = tab.info;
+
+  const tb = tab.titleblock || defaultTitleblock(tab, []);
+  $('tbEnabled').checked  = tb.enabled;
+  $('tbCorner').value     = tb.corner;
+  $('tbTitle').value      = tb.title;
+  $('tbAddress').value    = tb.address;
+  $('tbSubtitle').value   = tb.subtitle;
+  $('tbCamRange').value   = tb.camRange;
 }
 
 function removeViewTab(id, event) {
@@ -566,6 +741,151 @@ function toggleViewRed() {
   $('toggleRedBtn').textContent = tab.redVisible ? 'Hide unassigned' : 'Show unassigned';
 }
 
+// ── Titleblock overlay ───────────────────────────────────────────────────────
+function defaultTitleblock(tab, pts, data) {
+  const seqPts = (pts || []).filter(m => m.sequenced && m.proposed != null);
+  const camRange = seqPts.length
+    ? `Exterior Cameras ${Math.min(...seqPts.map(m => m.proposed))}-${Math.max(...seqPts.map(m => m.proposed))}`
+    : '';
+  const title = data && data.site_name
+    ? `${data.site_name}${data.loc_code ? ' (' + data.loc_code + ')' : ''}`
+    : tab.label;
+  return {
+    enabled:  true,
+    corner:   'upper-right',
+    title,
+    address:  (data && data.address) || '',
+    subtitle: 'Site Plan',
+    camRange,
+  };
+}
+
+function applyViewTitleblock() {
+  const tab = viewTabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  tab.titleblock = {
+    enabled:  $('tbEnabled').checked,
+    corner:   $('tbCorner').value,
+    title:    $('tbTitle').value,
+    address:  $('tbAddress').value,
+    subtitle: $('tbSubtitle').value,
+    camRange: $('tbCamRange').value,
+  };
+  renderTitleblockOverlay(tab);
+}
+
+function joinPath(folder, file) {
+  return folder.replace(/[\\/]+$/, '') + '\\' + file;
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+// Live on-page preview — a positioned DOM box over the Leaflet map, kept in
+// sync with tab.titleblock. Independent from drawTitleblock()/canvas export.
+function renderTitleblockOverlay(tab) {
+  const el = document.getElementById(`tbOverlay-${tab.id}`);
+  if (!el) return;
+  const tb = tab.titleblock;
+  if (!tb || !tb.enabled) { el.classList.add('hidden'); return; }
+  el.classList.remove('hidden');
+
+  el.style.top = el.style.bottom = el.style.left = el.style.right = 'auto';
+  const sideMargin = '14px', topMargin = '64px', botMargin = '14px';
+  if (tb.corner === 'upper-left')       { el.style.top = topMargin; el.style.left = sideMargin; }
+  else if (tb.corner === 'lower-left')  { el.style.bottom = botMargin; el.style.left = sideMargin; }
+  else if (tb.corner === 'lower-right') { el.style.bottom = botMargin; el.style.right = sideMargin; }
+  else                                   { el.style.top = topMargin; el.style.right = sideMargin; } // upper-right (default)
+
+  const parts = [];
+  if (tb.title)    parts.push(`<div class="tb-line-title">${escapeHtml(tb.title)}</div>`);
+  if (tb.address)  parts.push(`<div class="tb-line-address">${escapeHtml(tb.address)}</div>`);
+  if (tb.subtitle) parts.push(`<div class="tb-line-subtitle">${escapeHtml(tb.subtitle)}</div>`);
+  if (tb.camRange) parts.push(`<div class="tb-line-camrange">${escapeHtml(tb.camRange)}</div>`);
+  el.innerHTML = parts.join('');
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Font sizes/padding/margins here are the canvas-pixel twins of the
+// .tb-overlay CSS rules above — kept in lockstep so the live preview and the
+// exported image/PDF render the titleblock at the same visual size. `scale`
+// is the actual DOM-px → canvas-px ratio html2canvas used (normally
+// devicePixelRatio), not a guessed constant, so it holds on hi-DPI screens too.
+function drawTitleblock(ctx, canvasW, canvasH, tb, scale = 1) {
+  const lines = [
+    tb.title    && { text: tb.title,    size: 16, weight: '700', font: 'Arial',   color: '#111', marginTop: 0 },
+    tb.address  && { text: tb.address,  size: 11, weight: '400', font: 'Georgia', color: '#222', marginTop: 2 },
+    tb.subtitle && { text: tb.subtitle, size: 14, weight: '700', font: 'Arial',   color: '#111', marginTop: 4 },
+    tb.camRange && { text: tb.camRange, size: 12, weight: '700', font: 'Arial',   color: '#111', marginTop: 2 },
+  ].filter(Boolean);
+  if (!lines.length) return;
+
+  const padX = 14 * scale, padY = 10 * scale;   // matches .tb-overlay { padding: 10px 14px }
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);   // html2canvas can leave a leftover transform on the context
+  ctx.textBaseline = 'alphabetic';
+  let maxWidth = 0;
+  const metrics = lines.map(l => {
+    const px = Math.round(l.size * scale);
+    const font = `${l.weight} ${px}px ${l.font}`;
+    ctx.font = font;
+    const w = ctx.measureText(l.text).width;
+    maxWidth = Math.max(maxWidth, w);
+    return { text: l.text, font, color: l.color, w, h: px, marginTop: Math.round(l.marginTop * scale) };
+  });
+  const boxW = maxWidth + padX * 2;
+  const boxH = metrics.reduce((s, m) => s + m.marginTop + m.h * 1.25, 0) + padY * 2;
+
+  const sideMargin = 14 * scale, topMargin = 64 * scale, botMargin = 14 * scale;
+  let x, y;
+  if (tb.corner === 'upper-left')       { x = sideMargin; y = topMargin; }
+  else if (tb.corner === 'lower-left')  { x = sideMargin; y = canvasH - boxH - botMargin; }
+  else if (tb.corner === 'lower-right') { x = canvasW - boxW - sideMargin; y = canvasH - boxH - botMargin; }
+  else                                   { x = canvasW - boxW - sideMargin; y = topMargin; } // upper-right (default)
+
+  ctx.fillStyle   = 'rgba(255,255,255,0.92)';
+  ctx.strokeStyle = '#1a1a2e';
+  ctx.lineWidth   = 1.5 * scale;
+  roundRect(ctx, x, y, boxW, boxH, 6 * scale);
+  ctx.fill();
+  ctx.stroke();
+
+  let cy = y + padY;
+  metrics.forEach(m => {
+    cy += m.marginTop;
+    ctx.font = m.font;
+    ctx.fillStyle = m.color;
+    cy += m.h;
+    ctx.fillText(m.text, x + (boxW - m.w) / 2, cy);
+    cy += m.h * 0.25;
+  });
+  ctx.restore();
+}
+
+async function buildViewExportCanvas(tab) {
+  const mapEl  = document.getElementById(`viewMap-${tab.id}`);
+  const canvas = await html2canvas(mapEl, {
+    useCORS: true, allowTaint: false, logging: false,
+  });
+  if (tab.titleblock && tab.titleblock.enabled) {
+    const scale = canvas.width / (mapEl.clientWidth || canvas.width);
+    drawTitleblock(canvas.getContext('2d'), canvas.width, canvas.height, tab.titleblock, scale);
+  }
+  return canvas;
+}
+
 async function captureViewMap() {
   const tab = viewTabs.find(t => t.id === activeTabId);
   if (!tab) return;
@@ -574,9 +894,7 @@ async function captureViewMap() {
   btn.innerHTML = '<span class="spinner"></span>Capturing…';
   setAlert('viewCaptureMsg', '');
   try {
-    const canvas  = await html2canvas(document.getElementById(`viewMap-${tab.id}`), {
-      useCORS: true, allowTaint: false, logging: false,
-    });
+    const canvas  = await buildViewExportCanvas(tab);
     const base64  = canvas.toDataURL('image/png').split(',')[1];
     const data    = await api('/save_map_image', { image: base64, folder: tab.folder });
     if (data.error) setAlert('viewCaptureMsg', `Capture failed: ${data.error}`, 'red');
@@ -586,6 +904,42 @@ async function captureViewMap() {
   } finally {
     btn.disabled = false;
     btn.innerHTML = '📷 Capture Map';
+  }
+}
+
+async function downloadViewMap(kind) {
+  const tab = viewTabs.find(t => t.id === activeTabId);
+  if (!tab) return;
+  const btn = $(kind === 'pdf' ? 'viewDownloadPdfBtn' : 'viewDownloadImgBtn');
+  const origHtml = btn.innerHTML;
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Building…';
+  setAlert('viewCaptureMsg', '');
+  try {
+    const canvas = await buildViewExportCanvas(tab);
+    const base = (tab.label || 'site_plan').replace(/[^\w\-. ]/g, '_');
+    if (kind === 'image') {
+      await new Promise(resolve => canvas.toBlob(blob => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${base}.png`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        resolve();
+      }, 'image/png'));
+    } else {
+      const { jsPDF } = window.jspdf;
+      const orientation = canvas.width >= canvas.height ? 'landscape' : 'portrait';
+      const pdf = new jsPDF({ orientation, unit: 'px', format: [canvas.width, canvas.height] });
+      pdf.addImage(canvas.toDataURL('image/png'), 'PNG', 0, 0, canvas.width, canvas.height);
+      pdf.save(`${base}.pdf`);
+    }
+    setAlert('viewCaptureMsg', `Downloaded ${base}.${kind === 'pdf' ? 'pdf' : 'png'}`, 'green');
+  } catch (err) {
+    setAlert('viewCaptureMsg', `Download error: ${err.message}`, 'red');
+  } finally {
+    btn.disabled = false;
+    btn.innerHTML = origHtml;
   }
 }
 
@@ -628,6 +982,7 @@ function selectSchool() {
   $('ajXlsx').value      = s.xlsx_path;
   $('ajJson').value      = s.json_path;
   $('viewJsonPath').value = s.json_path;
+  $('viewFolder').value  = s.folder;
   $('rnXlsx').value      = s.xlsx_path;
 }
 
@@ -706,6 +1061,144 @@ function resolveHeadingModal(action) {
     shapeType:  $('headingModalShapeType').value,
   } : null);
 }
+
+// ── Image group modal (all images sharing a camera number) ──────────────────
+async function openImageGroupModal(folder, enumber, currentFile) {
+  $('imageGroupModalTitle').textContent = `📷 Camera #${enumber} — all images`;
+  const grid = $('imageGroupGrid');
+  grid.innerHTML = '<div style="padding:20px;color:#9ca3af">Loading…</div>';
+  show('imageGroupModal');
+
+  const data = await api('/images_for_number', { folder, enumber });
+  if (data.error) {
+    grid.innerHTML = `<div style="padding:20px;color:#dc2626">${escapeHtml(data.error)}</div>`;
+    return;
+  }
+  const files = data.files || [];
+  if (!files.length) {
+    grid.innerHTML = '<div style="padding:20px;color:#9ca3af">No images found for this camera number.</div>';
+    return;
+  }
+  grid.innerHTML = '';
+  files.forEach(f => {
+    const item = document.createElement('div');
+    item.className = 'image-group-item';
+
+    if (f.kind === 'video') {
+      item.style.cursor = 'pointer';
+      item.title = 'Click to play fullscreen';
+      const ph = document.createElement('div');
+      ph.style.cssText = 'width:100%;height:200px;background:#111;display:flex;' +
+                          'align-items:center;justify-content:center;color:#fff;font-size:44px';
+      ph.textContent = '▶';
+      item.appendChild(ph);
+      item.onclick = () => playVideoFullscreen(f.path);
+    } else {
+      if (f.name === currentFile) item.style.borderColor = '#1a73e8';
+      item.style.cursor = 'pointer';
+      item.title = 'Click to view fullscreen';
+      const img = document.createElement('img');
+      img.src = `/thumbnail?path=${encodeURIComponent(f.path)}`;
+      img.alt = '';
+      img.loading = 'lazy';
+      item.appendChild(img);
+      item.onclick = () => viewImageFullscreen(f.path, f.name);
+    }
+
+    const cap = document.createElement('div');
+    cap.className = 'cap';
+    cap.textContent = f.kind === 'video' ? `🎬 ${f.name}` : f.name;
+    item.appendChild(cap);
+    grid.appendChild(item);
+  });
+}
+
+function closeImageGroupModal() {
+  hide('imageGroupModal');
+}
+
+// ── Fullscreen video playback ────────────────────────────────────────────────
+let _fsVideoEl = null;
+
+async function playVideoFullscreen(path) {
+  if (!_fsVideoEl) {
+    _fsVideoEl = document.createElement('video');
+    _fsVideoEl.id = 'fsVideoPlayer';
+    _fsVideoEl.controls = true;
+    _fsVideoEl.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;background:#000;' +
+                                'z-index:10000;display:none';
+    document.body.appendChild(_fsVideoEl);
+    _fsVideoEl.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement) {
+        _fsVideoEl.pause();
+        _fsVideoEl.style.display = 'none';
+        _fsVideoEl.removeAttribute('src');
+        _fsVideoEl.load();
+      }
+    });
+  }
+  _fsVideoEl.src = `/video?path=${encodeURIComponent(path)}`;
+  _fsVideoEl.style.display = 'block';
+  try {
+    await _fsVideoEl.requestFullscreen();
+  } catch (e) {
+    // Fullscreen may be blocked (e.g. no user-gesture context); the fixed
+    // full-viewport overlay above still shows the video either way.
+  }
+  _fsVideoEl.play().catch(() => {});
+}
+
+// ── Fullscreen image viewer ──────────────────────────────────────────────────
+let _fsImageEl = null;
+
+async function viewImageFullscreen(path, name) {
+  if (!_fsImageEl) {
+    _fsImageEl = document.createElement('img');
+    _fsImageEl.id = 'fsImageViewer';
+    _fsImageEl.style.cssText = 'position:fixed;inset:0;width:100%;height:100%;background:#000;' +
+                                'object-fit:contain;z-index:10000;display:none;cursor:zoom-out';
+    _fsImageEl.title = 'Click to exit fullscreen';
+    document.body.appendChild(_fsImageEl);
+    _fsImageEl.onclick = () => {
+      if (document.fullscreenElement) document.exitFullscreen();
+      else { _fsImageEl.style.display = 'none'; _fsImageEl.removeAttribute('src'); }
+    };
+    _fsImageEl.addEventListener('fullscreenchange', () => {
+      if (!document.fullscreenElement) {
+        _fsImageEl.style.display = 'none';
+        _fsImageEl.removeAttribute('src');
+      }
+    });
+  }
+  _fsImageEl.src = `/image_full?path=${encodeURIComponent(path)}`;
+  _fsImageEl.alt = name || '';
+  _fsImageEl.style.display = 'block';
+  try {
+    await _fsImageEl.requestFullscreen();
+  } catch (e) {
+    // Fullscreen may be blocked (e.g. no user-gesture context); the fixed
+    // full-viewport overlay above still shows the image either way.
+  }
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  // Real fullscreen already exits on Escape natively; this is the fallback for
+  // when requestFullscreen() was blocked and the fixed-overlay viewer is stuck open.
+  if (!document.fullscreenElement) {
+    if (_fsImageEl && _fsImageEl.style.display !== 'none') {
+      _fsImageEl.style.display = 'none';
+      _fsImageEl.removeAttribute('src');
+    }
+    if (_fsVideoEl && _fsVideoEl.style.display !== 'none') {
+      _fsVideoEl.pause();
+      _fsVideoEl.style.display = 'none';
+      _fsVideoEl.removeAttribute('src');
+      _fsVideoEl.load();
+    }
+  }
+  if (!$('imageGroupModal').classList.contains('hidden')) closeImageGroupModal();
+});
 
 function toggleSection(bodyId, chevronId) {
   const open = $(bodyId).classList.toggle('open');
@@ -1244,7 +1737,8 @@ async function runRenames() {
   const btn = $('runBtn');
   btn.disabled = true;
   btn.innerHTML = `<span class="spinner"></span>${mode === 'copy' ? 'Copying' : 'Moving'}…`;
-  const data = await api('/run_renames', { xlsx, mode });
+  const onlySelected = $('rnOnlySelected').checked;
+  const data = await api('/run_renames', { xlsx, mode, only_selected: onlySelected });
   btn.disabled = false;
   btn.innerHTML = '▶️ Apply renames';
   if (data.error) { setAlert('rnResult', data.error, 'red'); return; }
@@ -1327,6 +1821,15 @@ loadSchools();
       <button class="btn-outline" onclick="resolveHeadingModal('set')">Set Only</button>
       <button class="btn-success" onclick="resolveHeadingModal('write')">Set &amp; Write to File</button>
     </div>
+  </div>
+</div>
+
+<!-- ── Image Group Modal (every image sharing a camera number) ── -->
+<div class="modal-overlay hidden" id="imageGroupModal" onclick="if (event.target === this) closeImageGroupModal()">
+  <div class="modal-box modal-box-max">
+    <button class="modal-close-x" onclick="closeImageGroupModal()" title="Close">✕</button>
+    <div class="modal-title" id="imageGroupModalTitle">📷 Camera images</div>
+    <div class="image-group-grid" id="imageGroupGrid"></div>
   </div>
 </div>
 

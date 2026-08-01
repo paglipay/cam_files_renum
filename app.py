@@ -57,6 +57,7 @@ STATE: dict = {
 INSTALL_RE = re.compile(r"_INSTALL", re.IGNORECASE)
 ENUMBER_RE = re.compile(r"(\d+)((?:_[A-Za-z]+|[A-Za-z]+)*)$")
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
+VIDEO_EXTS = {".mp4", ".mov", ".avi", ".m4v", ".wmv"}
 
 # lausd_tools project files (sibling directory)
 _LAUSD_TOOLS_DIR  = Path(__file__).parent.parent / "lausd_tools"
@@ -111,7 +112,9 @@ def _active_schools() -> list[dict]:
     for s in schools:
         if str(s.get("activate") or "").strip().lower() != "x":
             continue
-        site = str(s.get("Site") or s.get("School Name") or "Unknown").strip()
+        site        = str(s.get("Site") or s.get("School Name") or "Unknown").strip()
+        school_name = str(s.get("School Name") or site).strip()
+        address     = str(s.get("Address") or "").strip()
         loc  = s.get("Loc Code")
         if loc is None:
             loc_str = ""
@@ -124,10 +127,13 @@ def _active_schools() -> list[dict]:
         proj    = base / "Project Sites" / f"{_sanitize(site)}{suffix}"
         folder  = proj / Path(_CAM_SUBPATH)
         result.append({
-            "label":     f"{site}{suffix}",
-            "folder":    str(folder),
-            "xlsx_path": str(folder / _XLSX_NAME),
-            "json_path": str(folder / "cam_mapping.json"),
+            "label":       f"{site}{suffix}",
+            "site_name":   school_name,
+            "address":     address,
+            "loc_code":    loc_str,
+            "folder":      str(folder),
+            "xlsx_path":   str(folder / _XLSX_NAME),
+            "json_path":   str(folder / "cam_mapping.json"),
         })
     return result
 
@@ -335,10 +341,10 @@ def thumbnail():
     path = request.args.get("path", "")
     if not path or not os.path.isfile(path):
         return "", 404
-    # Verify the file is within the scanned folder
-    try:
-        Path(path).resolve().relative_to(Path(STATE["folder"]).resolve())
-    except ValueError:
+    # "View saved mappings" tabs can point at any project's folder, not just
+    # the currently-scanned one, so this only guards against serving
+    # non-image files rather than pinning to a single active folder.
+    if Path(path).suffix.lower() not in IMAGE_EXTS:
         return "", 403
     try:
         img = Image.open(path)
@@ -621,6 +627,23 @@ def save_map_image():
     return jsonify({"path": str(out_path)})
 
 
+def _norm_path(p: str) -> str:
+    return p.replace("\\", "/").rstrip("/").lower()
+
+
+def _match_school(folder: str):
+    """Find the active school whose Camera/Design/Pictures folder matches
+    `folder`, remapping legacy C:/Users/Paul/... paths first (mapping JSON
+    files may have been saved from a different machine/profile)."""
+    if not folder:
+        return None
+    candidates = {_norm_path(folder), _norm_path(_remap_legacy_user_path(folder))}
+    for s in _active_schools():
+        if _norm_path(s["folder"]) in candidates:
+            return s
+    return None
+
+
 @app.route("/load_mapping", methods=["POST"])
 def load_mapping():
     jp = (request.json or {}).get("json_path", "").strip()
@@ -635,14 +658,28 @@ def load_mapping():
 
     mapping = data.get("mapping", [])
     folder  = data.get("folder", "")
+    school  = _match_school(folder)
+
+    # The JSON may have been saved from a different machine/profile (legacy
+    # C:/Users/Paul/... paths). Prefer the matched school's current folder;
+    # otherwise try remapping the raw folder and use it only if it actually
+    # exists here. This is what image thumbnails and "Capture Map" saves key
+    # off of, so it needs to point at a real local path when possible.
+    resolved_folder = folder
+    if school:
+        resolved_folder = school["folder"]
+    else:
+        remapped = _remap_legacy_user_path(folder)
+        if os.path.isdir(remapped):
+            resolved_folder = remapped
 
     # If any entry lacks lat/lon (JSON saved before coordinates were recorded),
     # fall back to reading GPS directly from the image files in the folder.
     needs_gps = any(e.get("lat") is None for e in mapping)
-    if needs_gps and folder and os.path.isdir(folder):
+    if needs_gps and resolved_folder and os.path.isdir(resolved_folder):
         file_paths = {
             p.name: str(p)
-            for p in Path(folder).iterdir()
+            for p in Path(resolved_folder).iterdir()
             if INSTALL_RE.search(p.name) and p.suffix.lower() in IMAGE_EXTS
         }
         for entry in mapping:
@@ -661,10 +698,85 @@ def load_mapping():
                 entry["shape_type"] = shape_type
 
     return jsonify({
-        "folder":    folder,
-        "generated": data.get("generated", ""),
-        "mapping":   mapping,
+        "folder":     resolved_folder,
+        "generated":  data.get("generated", ""),
+        "mapping":    mapping,
+        "site_name":  school["site_name"] if school else None,
+        "address":    school["address"] if school else None,
+        "loc_code":   school["loc_code"] if school else None,
     })
+
+
+@app.route("/list_json", methods=["POST"])
+def list_json():
+    folder = (request.json or {}).get("folder", "").strip()
+    if not folder:
+        return jsonify({"error": "folder required"}), 400
+    if not os.path.isdir(folder):
+        return jsonify({"error": f"Folder not found: {folder}"}), 400
+    try:
+        entries = sorted(
+            (p for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() == ".json"),
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        )
+    except OSError as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify({"files": [{"name": p.name, "path": str(p)} for p in entries]})
+
+
+@app.route("/images_for_number", methods=["POST"])
+def images_for_number():
+    """Every image/video in `folder` whose extracted camera number matches
+    `enumber` — e.g. 103_INSTALL.jpg, 103A.jpg, 103B.jpg, 103_VIDEO.mp4 all
+    belong to camera 103."""
+    folder  = (request.json or {}).get("folder", "").strip()
+    enumber = (request.json or {}).get("enumber")
+    if not folder or enumber is None:
+        return jsonify({"error": "folder and enumber required"}), 400
+    if not os.path.isdir(folder):
+        return jsonify({"error": f"Folder not found: {folder}"}), 400
+    try:
+        enumber = int(enumber)
+    except (TypeError, ValueError):
+        return jsonify({"error": "enumber must be an integer"}), 400
+
+    matches = []
+    for p in Path(folder).iterdir():
+        if not p.is_file():
+            continue
+        suffix = p.suffix.lower()
+        if suffix in IMAGE_EXTS:
+            kind = "image"
+        elif suffix in VIDEO_EXTS:
+            kind = "video"
+        else:
+            continue
+        num, _, _ = _enumber(p.stem)
+        if num == enumber:
+            matches.append((p, kind))
+    matches.sort(key=lambda t: (t[1] != "image", t[0].name.lower()))
+    return jsonify({"files": [{"name": p.name, "path": str(p), "kind": k} for p, k in matches]})
+
+
+@app.route("/video")
+def video():
+    path = request.args.get("path", "")
+    if not path or not os.path.isfile(path):
+        return "", 404
+    if Path(path).suffix.lower() not in VIDEO_EXTS:
+        return "", 403
+    return send_file(path, conditional=True)
+
+
+@app.route("/image_full")
+def image_full():
+    """Full-resolution original — /thumbnail caps images at 320x320, too low-res for a fullscreen view."""
+    path = request.args.get("path", "")
+    if not path or not os.path.isfile(path):
+        return "", 404
+    if Path(path).suffix.lower() not in IMAGE_EXTS:
+        return "", 403
+    return send_file(path, conditional=True)
 
 
 @app.route("/apply_json", methods=["POST"])
@@ -765,8 +877,9 @@ def apply_json():
 
 @app.route("/run_renames", methods=["POST"])
 def run_renames():
-    xlsx = (request.json or {}).get("xlsx", "").strip()
-    mode = (request.json or {}).get("mode", "copy")
+    xlsx          = (request.json or {}).get("xlsx", "").strip()
+    mode          = (request.json or {}).get("mode", "copy")
+    only_selected = bool((request.json or {}).get("only_selected", False))
 
     if mode not in ("copy", "move"):
         return jsonify({"error": "mode must be 'copy' or 'move'"}), 400
@@ -778,8 +891,19 @@ def run_renames():
     ws, wsv = wb["input"], wbv["input"]
     fc, rc  = _col(ws, "found"), _col(ws, "replace")
 
+    sc = None
+    if only_selected:
+        try:
+            sc = _col(ws, "selected")
+        except ValueError:
+            return jsonify({"error": "No 'selected' column found — run Apply JSON first."}), 400
+
     count, log = 0, []
     for row in ws.iter_rows(min_row=2):
+        if only_selected:
+            sv = row[sc - 1].value
+            if not sv or str(sv).strip().lower() != "x":
+                continue
         src = _eff(row[fc - 1], wsv)
         dst = _eff(row[rc - 1], wsv)
         if not src or not dst:
